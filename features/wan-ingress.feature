@@ -158,6 +158,15 @@ Feature: WAN ingress — the resolver forwards only by agreement
     Then the command exits 0
     And the JSON field "decision" is "forward"
 
+  # Behind a terminator every client shares one source address, so a path from
+  # it is the client's header. A caller must not be able to make this node
+  # refuse a request on its own name by claiming to have already visited.
+  Scenario: a caller behind the terminator cannot make this node refuse itself
+    Given a fresh process named "wan-a" behind a trusted terminator with a border key
+    When I run "curl -sS -w '\n%{http_code}' '<addr>/forward?name=42' -H 'Authorization: Bearer <token>' -H 'X-Lab-Path: wan-a'"
+    Then the command exits 0
+    And the body has status "200"
+
   # The declaration is derived, not stored (SPLASH.md *Derived values*). Every
   # node reports the isotope of what it is running, so two nodes that disagree
   # are visible from outside either of them.

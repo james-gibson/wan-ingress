@@ -98,6 +98,19 @@ func ParsePeers(values []string) (PeerSet, error) {
 	return peers, nil
 }
 
+// Overlaps reports whether two sets share any address. CIDR blocks either
+// nest or are disjoint, so checking each block's network address is exact.
+func (p PeerSet) Overlaps(other PeerSet) bool {
+	for _, a := range p {
+		for _, b := range other {
+			if a.Contains(b.IP) || b.Contains(a.IP) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Contains reports whether a remote address belongs to a configured peer.
 func (p PeerSet) Contains(remoteAddr string) bool {
 	if len(p) == 0 {

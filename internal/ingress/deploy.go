@@ -41,6 +41,17 @@ func CheckDeployable(cfg Config) error {
 		return fmt.Errorf("border_key is a placeholder; generate one with: openssl rand -base64 32")
 	}
 
+	terminators, err := ParsePeers(cfg.Terminator)
+	if err != nil {
+		return err
+	}
+	peers, err := ParsePeers(cfg.Peers)
+	if err != nil {
+		return err
+	}
+	if terminators.Overlaps(peers) {
+		return fmt.Errorf("a peer range overlaps the terminator: a path from behind the terminator would be believed as a peer's")
+	}
 	if len(cfg.Peers) > 0 && cfg.Node == "" {
 		return fmt.Errorf("peers are configured but node is empty: a trusted path would never be extended, so the loop check would be silently off")
 	}

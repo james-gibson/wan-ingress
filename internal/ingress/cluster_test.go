@@ -214,3 +214,60 @@ func TestPolicyAndPathAreInsideTheSignature(t *testing.T) {
 		t.Fatal("the signature does not cover the path")
 	}
 }
+
+// Behind an nginx/LB every client arrives from the terminator's address. If the
+// terminator were treated as a peer, an anonymous caller could write a path and
+// have it believed — the flaw this split exists to prevent.
+func TestPathIsNotBelievedThroughATerminator(t *testing.T) {
+	border := &headerCapture{}
+	borderSrv := httptest.NewServer(border)
+	defer borderSrv.Close()
+
+	resolver := agreementFor(t, borderSrv.URL+"/cluster")
+	peers, err := ParsePeers([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminators, err := ParsePeers([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Resolver:   resolver,
+		Forwarder:  &Forwarder{BorderKey: []byte(testKey), Node: "wan-a", Policy: resolver.PolicyIsotope()},
+		Token:      testToken,
+		Observer:   NewObserver(),
+		Node:       "wan-a",
+		Peers:      peers,
+		Terminator: terminators,
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+
+	headers := authHeaders()
+	headers[pathHeader] = "wan-b"
+	status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d (%s)", status, body)
+	}
+	got, _, _ := border.last()
+	if path := got.Get(pathHeader); path != "wan-a" {
+		t.Fatalf("border path = %q, want the client path discarded (wan-a)", path)
+	}
+}
+
+func TestCheckDeployableRefusesAPeerInsideTheTerminator(t *testing.T) {
+	cfg := Config{
+		Addr:       "127.0.0.1:8443",
+		Node:       "wan-a",
+		Peers:      []string{"10.0.0.0/24"},
+		Terminator: []string{"10.0.0.7"},
+	}
+	if err := CheckDeployable(cfg); err == nil {
+		t.Fatal("overlapping peer and terminator ranges were accepted")
+	}
+	cfg.Terminator = []string{"10.0.1.7"}
+	if err := CheckDeployable(cfg); err != nil {
+		t.Fatalf("disjoint ranges were refused: %v", err)
+	}
+}

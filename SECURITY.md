@@ -67,6 +67,8 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | anonymous status scraping | `/status`, `/mcp`, `/readyz` | counters and readiness only; no route, address or namespace | `TestAnonymousSurfacesLeakNoRoute` |
 | a route that already contains this node | `X-Lab-Path` | `422 path_loop`, refused before the body and before the border | `TestRouteContainingThisNodeIsRefused` |
 | an anonymous caller naming a node | `X-Lab-Path` from a non-peer | discarded; the path starts fresh at this node | `TestUntrustedPathIsDiscarded` |
+| a client behind an nginx/LB naming a node | `X-Lab-Path` from the terminator | discarded — the terminator relays arbitrary clients, so its path proves nothing | `TestPathIsNotBelievedThroughATerminator` |
+| a peer range that overlaps the terminator | `check-config` | refused at startup | `TestCheckDeployableRefusesAPeerInsideTheTerminator` |
 | rewriting the path or the policy in transit | both are inside the HMAC | the border's signature check fails | `harness/border_adapter_test.py` |
 | two nodes running different declarations | `GET /policy` | same declaration → same isotope; a difference is visible from outside either node | `TestTheSameDeclarationDerivesTheSameIsotope`, `TestADifferentDeclarationDerivesADifferentIsotope` |
 
@@ -138,22 +140,29 @@ discovers.
    certificate loaded by `ServeTLS`.
 8. **HTTP/1.1 and HTTP/2 by default.** No cipher allow-list, no HSTS, no OCSP
    stapling. Terminate TLS at an edge if you need that policy surface.
-9. **Peers are trusted by address, not by credential.** A path is believed when
+9. **A path is trusted by address, not by signature.** A peer is believed
+   because its TCP address is configured; a terminator is never believed. That
+   is the right split for a load balancer, but it means the *peer* set is a
+   credential-equivalent: anyone who can source traffic from a peer address can
+   write a path. The correct long-term form is a scoped credential per hop
+   (`lab/SPLASH.md` *Transport assumptions*: token exchange, DPoP, mTLS), so the
+   path carries its own proof and the source address stops mattering.
+10. **Peers are trusted by address, not by credential.** A path is believed when
    the TCP peer is inside a configured CIDR. A spoofed source cannot complete a
    handshake, so this is stronger than it sounds, but a compromised host inside
    the range can write a path — and a path is evidence, not authority
    (`lab/SPLASH.md`: *holding an isotope is not reachability*). If a peer set is
    configured, give each peer its own credential rather than relying on the
    network location.
-10. **`/policy` is public.** It publishes a derived digest and two counts, never a
+11. **`/policy` is public.** It publishes a derived digest and two counts, never a
     route, address or namespace. A digest is a confirmation oracle for a guessed
     declaration; the declaration is operator-owned and the token is the secret,
     so the disclosure is bounded — but it is a disclosure.
-11. **The policy isotope detects divergence; it does not resolve it.** A node
+12. **The policy isotope detects divergence; it does not resolve it.** A node
     with a stale declaration reports a stale isotope, which is the point, but
     the front does not refuse to serve on a mismatch — it has nothing to compare
     against. The border or a peer does the comparison.
-12. **`addr` is not re-read on reload.** The listener is the deployment; the
+13. **`addr` is not re-read on reload.** The listener is the deployment; the
    policy is what `SIGHUP` swaps. Changing `addr` in the file has no effect
    until a restart, which is logged.
 

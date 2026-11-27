@@ -12,12 +12,13 @@ import (
 // forwarding, and observable refusals. It is built from the feature in
 // features/wan-ingress.feature.
 type Server struct {
-	Resolver  *Resolver
-	Forwarder *Forwarder
-	Token     string
-	Observer  *Observer
-	Node      string
-	Peers     PeerSet
+	Resolver   *Resolver
+	Forwarder  *Forwarder
+	Token      string
+	Observer   *Observer
+	Node       string
+	Peers      PeerSet
+	Terminator PeerSet
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -138,8 +139,11 @@ func (s *Server) servePolicy(w http.ResponseWriter, _ *http.Request) {
 // believed only from a configured peer; otherwise it is discarded so that an
 // anonymous caller cannot make this node refuse a request on another's behalf.
 func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	// A terminator relays arbitrary clients, so its address proves nothing
+	// about the path it forwards. Only a directly reached peer is believed.
+	trusted := s.Peers.Contains(r.RemoteAddr) && !s.Terminator.Contains(r.RemoteAddr)
 	var carried []string
-	if s.Peers.Contains(r.RemoteAddr) {
+	if trusted {
 		parsed, err := ParsePath(r.Header.Get(pathHeader))
 		if err != nil {
 			s.refuse(w, "malformed")

@@ -9,9 +9,9 @@ config and its agreement file.
 
 | field | value |
 | --- | --- |
-| isotope (origin feature) | `GWGMG0iJKGjU4O1lo2w1CNQ_60GtQwMxB0O8MTOZaYA` |
-| signature prefix (key `seed-42`) | `1aa432915a39bf60…` |
-| tokens / parts | 144 / 25 |
+| isotope (origin feature) | `GBcFWtOHS-vATnxi4dpiILyggRECufP3MrlYkVMuGSs` |
+| signature prefix (key `seed-42`) | `7a2f99d42815076c…` |
+| tokens / parts | 149 / 26 |
 
 The origin is [`features/wan-ingress.feature`](features/wan-ingress.feature),
 written and validated before the first line of Go.
@@ -88,8 +88,14 @@ A path vector, so a route cannot contain itself (`lab/SPLASH.md` → *The proxy*
 `lab/SLA.md` §12):
 
 ```json
-{ "node": "wan-a", "peers": ["10.0.0.0/24"] }
+{ "node": "wan-a", "peers": ["10.0.0.0/24"], "terminator": ["10.0.0.5"] }
 ```
+
+Behind an nginx or a cloud load balancer, every client shares the terminator's
+source address. `terminator` names it so its traffic is **not** trusted as a
+peer's: a path from the terminator is a client's header and is discarded. A
+range listed in both is refused at startup, because that is exactly the
+configuration where a client's path would be believed.
 
 - every forward appends this node to `X-Lab-Path`, which is inside the signature;
 - a route whose path already contains this node is `422 path_loop`, refused

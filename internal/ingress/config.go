@@ -25,10 +25,16 @@ type Config struct {
 	// instance needs its own value, or the loop check refuses its peers.
 	Node string `json:"node,omitempty"`
 
-	// Peers are the addresses whose route path is believed. A path from any
-	// other source is ignored, so an anonymous caller cannot name a node and
-	// have it refuse a request it never saw.
+	// Peers are ingress instances reached directly, whose route path is
+	// believed. A path from any other source is ignored, so an anonymous
+	// caller cannot name a node and have it refuse a request it never saw.
 	Peers []string `json:"peers,omitempty"`
+
+	// Terminator is the TLS terminator or load balancer in front of this
+	// instance (nginx, a cloud LB). It relays arbitrary clients, so a path
+	// arriving from it is a *client's* header, not a peer's: it is ignored even
+	// when the address is also listed in peers.
+	Terminator []string `json:"terminator,omitempty"`
 
 	// TLSCert and TLSCertKey terminate TLS in this process. A public bind
 	// without them is refused unless AllowPlaintextWAN is set, and that flag
@@ -82,13 +88,18 @@ func NewServer(cfg Config, observer *Observer) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	terminators, err := ParsePeers(cfg.Terminator)
+	if err != nil {
+		return nil, err
+	}
 	srv := &Server{
-		Resolver:  resolver,
-		Forwarder: &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
-		Token:     cfg.Token,
-		Observer:  observer,
-		Node:      cfg.Node,
-		Peers:     peers,
+		Resolver:   resolver,
+		Forwarder:  &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
+		Token:      cfg.Token,
+		Observer:   observer,
+		Node:       cfg.Node,
+		Peers:      peers,
+		Terminator: terminators,
 	}
 	srv.Handler() // build the mux once, at swap time
 	return srv, nil

@@ -39,7 +39,8 @@ var (
 	tlsKey     = flag.String("tls-key", "", "PEM private key for TLS termination")
 	plaintext  = flag.Bool("allow-plaintext-wan", false, "bind publicly without TLS; TLS must be terminated in front")
 	node       = flag.String("node", "", "this ingress's name in a route path (required in a sub-cluster)")
-	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs whose route path is believed")
+	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs of ingress peers whose route path is believed")
+	terminator = flag.String("terminator", "", "comma-separated IPs/CIDRs of the TLS terminator/LB in front")
 )
 
 func main() {
@@ -194,6 +195,8 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.Node = *node
 		case "peers":
 			cfg.Peers = splitList(*peers)
+		case "terminator":
+			cfg.Terminator = splitList(*terminator)
 		}
 	})
 }
