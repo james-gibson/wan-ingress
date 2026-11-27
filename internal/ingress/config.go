@@ -30,6 +30,12 @@ type Config struct {
 	// caller cannot name a node and have it refuse a request it never saw.
 	Peers []string `json:"peers,omitempty"`
 
+	// MaxConns is the local hard cap on accepted connections. Excess callers
+	// wait in the kernel accept queue, so the front's footprint is a function of
+	// this number rather than of how fast sockets arrive. A grant may lower the
+	// admitted figure; it never raises this one.
+	MaxConns int `json:"max_conns,omitempty"`
+
 	// Terminator is the TLS terminator or load balancer in front of this
 	// instance (nginx, a cloud LB). It relays arbitrary clients, so a path
 	// arriving from it is a *client's* header, not a peer's: it is ignored even

@@ -41,6 +41,7 @@ var (
 	node       = flag.String("node", "", "this ingress's name in a route path (required in a sub-cluster)")
 	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs of ingress peers whose route path is believed")
 	terminator = flag.String("terminator", "", "comma-separated IPs/CIDRs of the TLS terminator/LB in front")
+	maxConns   = flag.Int("max-conns", 0, "hard cap on accepted connections (0 = unbounded)")
 )
 
 func main() {
@@ -57,8 +58,11 @@ func main() {
 	if checkErr := ingress.CheckDeployable(cfg); checkErr != nil {
 		log.Fatalf("refusing to start: %v", checkErr)
 	}
+	if cfg.MaxConns == 0 {
+		log.Printf("warning: max_conns is unset; the connection count is bounded only by the host (docs/placement.md)")
+	}
 	if *checkConfig {
-		log.Printf("config ok: addr=%s tls=%t agreements=%q", cfg.Addr, cfg.TLSCert != "", cfg.Agreements)
+		log.Printf("config ok: addr=%s tls=%t agreements=%q max_conns=%d", cfg.Addr, cfg.TLSCert != "", cfg.Agreements, cfg.MaxConns)
 		return
 	}
 	log.Printf("config loaded: agreements=%q ready=%t", cfg.Agreements, cfg.Token != "" && cfg.BorderKey != "")
@@ -75,6 +79,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", cfg.Addr, err)
 	}
+	// The cap is applied to the listener, not the handler: unbounded connections
+	// cost memory before a request is ever parsed.
+	listener = ingress.NewLimitListener(listener, cfg.MaxConns)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -148,7 +155,7 @@ func main() {
 
 	// A config reload may not rebind: the listener is the deployment, the
 	// policy is the swap. Say so instead of silently ignoring a changed addr.
-	log.Printf("wan-ingress listening on %s tls=%t plaintext_wan=%t", listener.Addr(), cfg.TLSCert != "", cfg.AllowPlaintextWAN)
+	log.Printf("wan-ingress listening on %s tls=%t plaintext_wan=%t max_conns=%d", listener.Addr(), cfg.TLSCert != "", cfg.AllowPlaintextWAN, cfg.MaxConns)
 	var serveErr error
 	if cfg.TLSCert != "" {
 		serveErr = httpServer.ServeTLS(listener, cfg.TLSCert, cfg.TLSKey)
@@ -197,6 +204,8 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.Peers = splitList(*peers)
 		case "terminator":
 			cfg.Terminator = splitList(*terminator)
+		case "max-conns":
+			cfg.MaxConns = *maxConns
 		}
 	})
 }
