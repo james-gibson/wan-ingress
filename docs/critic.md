@@ -23,18 +23,28 @@ Membership eviction is the remaining drift: a front whose policy isotope
 diverges is *detectable* but nothing removes it from the routable set. The ban log
 is the hook — it names the address and the reason, and the host decides.
 
-## The freshness proof
+## The grace, the span, and the wobble
 
-The 5 s tick is a cluster clock-skew tolerance, not the finest claim the envelope
-can support. The envelope now carries milliseconds, and the border's window is a
-parameter. Measured across the LAN (front on jack, border on dmz), 40 forwards
-per setting: **40/40 accepted at 1000, 100, 25, 10, 5 and 1 ms.** The two hosts
-agree to better than a millisecond, so the window is bounded by the path rather
-than by skew — 100 ms is a sane default for a nearby edge, 25 ms is provable on a
-LAN, and both are ~50x tighter than the tick.
+Replay is not the threat; it is the stability promise. A negotiated path may be
+reused while it is current, and the bound is the route's **age**, not the link's
+freshness. Two bounds:
 
-This is the shape a critic should want: the claim is a window on a curve with a
-stated bound (`one-way delay + skew + jitter`), not a flag that says "fresh".
+| bound | default | behaviour |
+| --- | --- | --- |
+| link window | 5 s (grace tick) | a node may present the previous tick's path |
+| route span | 15 s (three ticks) | past it the route **dissolves** |
+| edge link | 25–100 ms (proven to 1 ms) | a short path may be held to a much tighter window |
+
+Measured across the LAN (front on jack, border on dmz): a route started 1 s ago,
+14 s ago and just now was accepted; one started 20 s ago returned
+`422 route_dissolved`.
+
+And the failure that matters: **a node that wobbles destroys the path.** The route
+start is carried inside the signature and preserved by every hop, so one node
+presenting a future or expired start invalidates the route for everyone
+downstream. That is the honest failure — not a forged replay, but a path that
+quietly stopped being current — and it is why the span is a check with a bound
+rather than a flag that says "valid".
 
 ## The evidence standard this does not yet meet
 

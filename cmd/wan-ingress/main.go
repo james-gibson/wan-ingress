@@ -45,6 +45,7 @@ var (
 	maxConns   = flag.Int("max-conns", 0, "hard cap on accepted connections (0 = unbounded)")
 	banLog     = flag.String("ban-log", "", "file of ban lines for a host filter (fail2ban); empty disables")
 	neverBan   = flag.String("never-ban", "", "comma-separated IPs/CIDRs that can never be banned (the jump host)")
+	routeSpan  = flag.Int("route-span-ms", 0, "how long a negotiated path stays usable (default 15000)")
 	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
 	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
 )
@@ -104,7 +105,7 @@ func main() {
 	// renewed grant can change capacity live.
 	limiter := ingress.NewLimitListener(listener, conns)
 	listener = limiter
-	log.Printf("capacity: %d connections (grant=%t)", conns, held != nil)
+	log.Printf("capacity: %d connections (grant=%t) route_span=%dms", conns, held != nil, cfg.RouteSpanMS)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -253,6 +254,8 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.BanLog = *banLog
 		case "never-ban":
 			cfg.NeverBan = splitList(*neverBan)
+		case "route-span-ms":
+			cfg.RouteSpanMS = *routeSpan
 		}
 	})
 }

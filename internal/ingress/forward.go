@@ -87,21 +87,21 @@ func (f *Forwarder) Ready() bool {
 // Forward copies the route's address into a URL, signs the envelope and posts
 // the body. Any destination supplied by the caller is ignored.
 func (f *Forwarder) Forward(ctx context.Context, route Route, name string, body []byte) (int, error) {
-	out, err := f.ForwardObserved(ctx, route, name, body, nil)
+	out, err := f.ForwardObserved(ctx, route, name, body, nil, time.Now().UnixMilli())
 	return out.Status, err
 }
 
 // ForwardPath is Forward with the route's history. Kept as the simple form for
 // callers that only need the status.
 func (f *Forwarder) ForwardPath(ctx context.Context, route Route, name string, body []byte, hops []string) (int, error) {
-	out, err := f.ForwardObserved(ctx, route, name, body, hops)
+	out, err := f.ForwardObserved(ctx, route, name, body, hops, time.Now().UnixMilli())
 	return out.Status, err
 }
 
 // ForwardObserved is ForwardPath returning what came back as well as what
 // happened: whether the canary survived the round trip and how many requests the
 // border says it has seen.
-func (f *Forwarder) ForwardObserved(ctx context.Context, route Route, name string, body []byte, hops []string) (Outcome, error) {
+func (f *Forwarder) ForwardObserved(ctx context.Context, route Route, name string, body []byte, hops []string, start int64) (Outcome, error) {
 	if !f.Ready() || route.Address == "" {
 		return Outcome{}, ErrBorderUnconfigured
 	}
@@ -138,13 +138,14 @@ func (f *Forwarder) ForwardObserved(ctx context.Context, route Route, name strin
 	// skew across a cluster; the envelope can carry a much tighter claim.
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	mac := hmac.New(sha256.New, f.BorderKey)
-	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
+	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%d",
 		http.MethodPost, u.EscapedPath(), route.Namespace, f.Policy, FormatPath(hops),
-		canary, hex.EncodeToString(digest[:]), timestamp)
+		canary, hex.EncodeToString(digest[:]), timestamp, start)
 	req.Header.Set("X-Lab-Signature", hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-Lab-Namespace", route.Namespace)
 	req.Header.Set("X-Lab-Policy", f.Policy)
 	req.Header.Set("X-Lab-Path", FormatPath(hops))
+	req.Header.Set(routeStartHeader, strconv.FormatInt(start, 10))
 	req.Header.Set("X-Lab-Timestamp", timestamp)
 	req.Header.Set("Content-Type", "application/octet-stream")
 

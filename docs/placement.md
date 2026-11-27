@@ -221,6 +221,7 @@ authority a general signing oracle and puts an RTT in front of every request.
 | second witness | implemented (`X-Lab-Seen`, `/status.border_seen`, `.witness_gap`) |
 | declared shape | implemented (`X-Lab-Shape`, `shape_mismatch` / `shape_unknown`) |
 | eviction hook | implemented (`-ban-log`, `-never-ban`; enforcement stays on the host) |
+| route span + dissolution | implemented (`-route-span-ms`, `X-Lab-Route-Start`, `route_dissolved`) |
 | splice mode | measured in a harness, not in the binary |
 
 The next code change is inheriting the read/idle timeouts on any raw path (splice

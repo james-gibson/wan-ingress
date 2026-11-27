@@ -43,6 +43,11 @@ type Config struct {
 	Grant    string `json:"grant,omitempty"`
 	GrantKey string `json:"grant_key,omitempty"`
 
+	// RouteSpanMS bounds how long a negotiated path stays usable. Replay within
+	// the span is the stability promise, not a threat: the bound is age. Default
+	// is three grace ticks (15s); a link may spend it at any baud.
+	RouteSpanMS int `json:"route_span_ms,omitempty"`
+
 	// BanLog is a file of ban lines a host-side filter (fail2ban) can read, and
 	// NeverBan is the allowlist. Enforcement stays outside the front so a bad
 	// threshold cannot lock an operator out of the fix.
@@ -112,13 +117,14 @@ func NewServer(cfg Config, observer *Observer) (*Server, error) {
 		return nil, err
 	}
 	srv := &Server{
-		Resolver:   resolver,
-		Forwarder:  &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
-		Token:      cfg.Token,
-		Observer:   observer,
-		Node:       cfg.Node,
-		Peers:      peers,
-		Terminator: terminators,
+		Resolver:    resolver,
+		Forwarder:   &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
+		Token:       cfg.Token,
+		Observer:    observer,
+		Node:        cfg.Node,
+		RouteSpanMS: cfg.RouteSpanMS,
+		Peers:       peers,
+		Terminator:  terminators,
 	}
 	srv.Handler() // build the mux once, at swap time
 	return srv, nil

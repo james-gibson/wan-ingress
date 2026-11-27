@@ -6,21 +6,23 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Server is the WAN front: thin admission, resolution by agreement, signed
 // forwarding, and observable refusals. It is built from the feature in
 // features/wan-ingress.feature.
 type Server struct {
-	Resolver   *Resolver
-	Forwarder  *Forwarder
-	Token      string
-	Observer   *Observer
-	Node       string
-	Peers      PeerSet
-	Terminator PeerSet
-	Shapes     *ShapeSet
-	Bans       *BanLog
+	Resolver    *Resolver
+	Forwarder   *Forwarder
+	Token       string
+	Observer    *Observer
+	Node        string
+	RouteSpanMS int
+	Peers       PeerSet
+	Terminator  PeerSet
+	Shapes      *ShapeSet
+	Bans        *BanLog
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -102,6 +104,14 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A route may be replayed within its span — that is the stability promise —
+	// but it may not outlive it. The start travels inside the signature, so a hop
+	// cannot backdate the route to keep it alive.
+	start, startOK := s.routeStart(w, r)
+	if !startOK {
+		return
+	}
+
 	// The class is decided from the declared header and the body length, and the
 	// budget is taken before the body is read: refusing after reading is the
 	// memory cost the budget exists to avoid.
@@ -131,7 +141,7 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, r, http.StatusUnprocessableEntity, "malformed")
 		return
 	}
-	outcome, err := s.Forwarder.ForwardObserved(r.Context(), *decision.Route, rawName, body, path)
+	outcome, err := s.Forwarder.ForwardObserved(r.Context(), *decision.Route, rawName, body, path, start)
 	if err != nil {
 		s.refuse(w, r, http.StatusBadGateway, "upstream")
 		return
@@ -148,6 +158,26 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 	forwarded := Decision{Decision: "forward", Route: decision.Route, UpstreamStatus: outcome.Status}
 	s.Observer.Record(forwarded)
 	writeDecision(w, http.StatusOK, forwarded)
+}
+
+// routeStart resolves the instant this route began. A carried start is believed
+// only from a trusted peer, for the same reason the path is: otherwise a caller
+// could backdate a route and extend its own grace.
+func (s *Server) routeStart(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	carried := ""
+	if s.Peers.Contains(r.RemoteAddr) && !s.Terminator.Contains(r.RemoteAddr) {
+		carried = r.Header.Get(routeStartHeader)
+	}
+	span := time.Duration(s.RouteSpanMS) * time.Millisecond
+	if span <= 0 {
+		span = DefaultRouteSpan
+	}
+	start, err := RouteStart(carried, time.Now(), span)
+	if err != nil {
+		s.refuse(w, r, http.StatusUnprocessableEntity, "route_dissolved")
+		return 0, false
+	}
+	return start, true
 }
 
 // servePolicy publishes the derived isotope of the declaration this node is

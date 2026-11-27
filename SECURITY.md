@@ -63,7 +63,8 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | oversized body | > 1 MiB | `422`, border never contacted | `TestOversizedBodyIsRefusedBeforeTheBorder` |
 | duplicate `name` parameters | `?name=42&name=evil` | first wins for both resolve and forward | `TestDuplicateNameParametersResolveAndForwardTheSameName` |
 | stale captured envelope | `X-Lab-Timestamp` outside the window | border refuses | `harness/border_adapter_test.py` |
-| a window tighter than a second | millisecond timestamps | 40/40 forwards pass at **1 ms** across the LAN | live sweep, see below |
+| a route past its span | `X-Lab-Route-Start` | `422 route_dissolved`, border never contacted | `TestDissolvedRouteIsRefusedBeforeTheBorder` |
+| a hop backdating a route | the start is inside the signature | the border's signature check fails | `harness/border_adapter_test.py` |
 | a resolution counted as a forward | the monitor's green light | only `/forward` advertises `ingress/forward` | `TestResolveAloneDoesNotAdvertiseForwarding` |
 | anonymous status scraping | `/status`, `/mcp`, `/readyz` | counters and readiness only; no route, address or namespace | `TestAnonymousSurfacesLeakNoRoute` |
 | a route that already contains this node | `X-Lab-Path` | `422 path_loop`, refused before the body and before the border | `TestRouteContainingThisNodeIsRefused` |
@@ -73,31 +74,50 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | rewriting the path or the policy in transit | both are inside the HMAC | the border's signature check fails | `harness/border_adapter_test.py` |
 | two nodes running different declarations | `GET /policy` | same declaration → same isotope; a difference is visible from outside either node | `TestTheSameDeclarationDerivesTheSameIsotope`, `TestADifferentDeclarationDerivesADifferentIsotope` |
 
-### The freshness window
+### Grace and the span: two bounds, not one
 
-The envelope carries **milliseconds**, not seconds, so a window tighter than one
-second is expressible. The lab's 5 s tick is a clock-skew tolerance for the
-cluster; it is not the finest claim the envelope can support.
+A captured envelope is **replayable on purpose**. "Follow the cluster rules and
+the path holds" is the stability promise: a negotiated route may be reused, and a
+defence that refused reuse would break the thing it protects. So there are two
+bounds, and they answer different questions.
 
-The window must exceed `one-way delay + clock skew + jitter`, so it is set per
-deployment. Measured on 2026-11-27, front on jack and border on dmz across a
-1 Gbps LAN (0.32 ms RTT), 40 forwards per setting:
+| bound | scope | default | what it answers |
+| --- | --- | --- | --- |
+| **link window** (`--skew-ms`) | one hop | 5 s (the grace tick) | is this envelope too old for *this link*? |
+| **route span** (`route_span_ms`) | the whole path | 15 s (three grace ticks) | has this route chained more grace than a path may spend? |
 
-| window | accepted |
+The link window is wide for cluster nodes because the grace tick is wide: a node
+may present the previous tick's path. The span is what stops grace from chaining
+forever — a route that outlives it **dissolves** (`422 route_dissolved`) rather
+than being extended by another hop.
+
+Measured across the LAN on 2026-11-27 (front on jack, border on dmz, span 15 s):
+a route started 1 s ago, 14 s ago, and just now all pass; a route started 20 s
+ago dissolves. Replay inside the span is accepted — that is the promise — and the
+age is carried in the signature (`X-Lab-Route-Start`), so a hop cannot backdate a
+route to keep it alive.
+
+The 5 s tick is a *scheduling* window, not a ceiling on precision. The mechanism
+supports far tighter links — 40/40 forwards passed at a **1 ms** window between
+the two hosts — which is what an edge link should use when its path is short.
+Cluster links stay wide:
+
+| link | window |
 | --- | --- |
-| 1000 ms | 40/40 |
-| 100 ms | 40/40 |
-| 25 ms | 40/40 |
-| 10 ms | 40/40 |
-| 5 ms | 40/40 |
-| **1 ms** | **40/40** |
+| same host | ~1 ms (measured) |
+| LAN edge | 25–100 ms (measured to 1 ms) |
+| cluster node | 5 s (the grace tick) |
+| route span | 15 s, then dissolution |
 
-The two hosts' clocks agree to better than a millisecond, so on this LAN the
-window is bounded by the path, not by skew. The 5 s tick is roughly 5000× looser
-than the mechanism needs. It stays the right number for the *cluster* — a tick is
-a shared schedule, not a freshness check — but an operator setting the envelope
-window should use `one-way delay + margin`, and 100 ms is a sane default for a
-nearby edge over 25 ms, which leaves no room for a WAN path.
+### Why a wobbling node destroys the path
+
+The route's start travels inside the signature and is preserved by every hop, so
+every hop ages the route by the same clock. A node whose clock wobbles either
+presents a start in the future (refused) or one that has already outlived the
+span (dissolved) — and because the start is shared, one bad node invalidates the
+route for every hop downstream of it. That is the failure mode the span exists to
+expose: not a hostile replay, but an honest path that quietly stopped being
+current.
 
 ### Measured, not asserted
 

@@ -14,7 +14,7 @@ import time
 import unittest
 import urllib.parse
 
-from border_adapter import SKEW_MS, verify
+from border_adapter import ROUTE_SPAN_MS, SKEW_MS, verify
 
 KEY = b"border-key"
 PATH_BASE = "/cluster/namespace/session-42/name/42"
@@ -23,6 +23,7 @@ BODY = b'{"jsonrpc":"2.0","id":1,"method":"adhd.status"}'
 POLICY = "cG9saWN5LWlzb3RvcGU"
 ROUTE_PATH = "wan-a"
 CANARY = "deadbeef"
+ROUTE_START = int(time.time() * 1000)
 
 
 class Headers(dict):
@@ -35,8 +36,8 @@ def envelope(stamp_ms: int) -> Headers:
     escaped = urllib.parse.quote(PATH_BASE, safe="/")
     signature = hmac.new(
         KEY,
-        ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s" % (
-            escaped, NAMESPACE, POLICY, ROUTE_PATH, CANARY, digest, stamp_ms)).encode(),
+        ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%d" % (
+            escaped, NAMESPACE, POLICY, ROUTE_PATH, CANARY, digest, stamp_ms, ROUTE_START)).encode(),
         hashlib.sha256,
     ).hexdigest()
     return Headers({
@@ -45,6 +46,7 @@ def envelope(stamp_ms: int) -> Headers:
         "X-Lab-Policy": POLICY,
         "X-Lab-Path": ROUTE_PATH,
         "X-Lab-Canary": CANARY,
+        "X-Lab-Route-Start": str(ROUTE_START),
     })
 
 
@@ -86,6 +88,16 @@ class BorderVerifyTest(unittest.TestCase):
     def test_a_different_policy_is_refused(self):
         headers = envelope(int(time.time() * 1000))
         headers["X-Lab-Policy"] = "b3RoZXItcG9saWN5"
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
+
+    def test_a_route_inside_its_span_is_accepted(self):
+        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time() * 1000))))
+
+    def test_a_route_past_its_span_dissolves(self):
+        headers = envelope(int(time.time() * 1000))
+        headers["X-Lab-Route-Start"] = str(int(time.time() * 1000) - ROUTE_SPAN_MS - 10)
+        # The signature covers the start, so this is also a signature failure —
+        # which is the point: a hop cannot backdate a route to stay alive.
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
     def test_a_rewritten_canary_is_refused(self):
