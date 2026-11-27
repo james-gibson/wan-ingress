@@ -26,8 +26,9 @@ semantics.
    # edit token, border key and border URL
    ```
 
-   These files are **shapes**, not usable defaults. An empty token, key or
-   agreement set leaves the front fail-closed.
+   These files are **shapes**, not usable defaults. The token is a placeholder,
+   so the front **refuses to start** until you replace it; the stack is
+   fail-closed rather than fail-open. See [`SECURITY.md`](SECURITY.md).
 
 2. Point the compose mount at your local copies (or edit the mounted files in
    place), then start:
@@ -66,7 +67,11 @@ The port defaults to `8443`; override with `WAN_INGRESS_PORT`.
   files with `:ro`; no secret is baked into a layer. Use a secret manager or
   file-permission-controlled host mounts in production.
 - **fail closed** — without agreements, token, border key and an agreed border,
-  the front refuses or quarantines every call.
+  the front refuses or quarantines every call; with a placeholder secret it
+  refuses to start at all.
+- **TLS is not in this image's default** — the stack publishes plaintext on 8443
+  and sets `allow_plaintext_wan`, which is the explicit statement that TLS is
+  terminated in front. Terminate it, or mount a cert/key and drop that flag.
 
 The boundary stays clean: the seed/address plane narrows the visitor, agreement
 plus HMAC border decides what may cross.

@@ -9,9 +9,9 @@ config and its agreement file.
 
 | field | value |
 | --- | --- |
-| isotope (origin feature) | `5205c3f5d2de34a8…` |
-| tokens / parts | 111 / 19 |
-| key | `seed-42` |
+| isotope (origin feature) | `VEy5JA5oqzwueYNPiRpoNBvzPYV_hnxlheiQA5h9tjg` |
+| signature prefix (key `seed-42`) | `6ebfe5f8f5145c7e…` |
+| tokens / parts | 122 / 21 |
 
 The origin is [`features/wan-ingress.feature`](features/wan-ingress.feature),
 written and validated before the first line of Go.
@@ -37,7 +37,7 @@ shell-to-gherkin canon validated, and the signature above is reproduced by
 - `GET /resolve?name=<raw>` → agreed route, or `422` with `malformed` / `unknown` / `ambiguous`
 - `POST /forward?name=<raw>` → HMAC-signed border envelope, or a typed refusal
   (`border_unconfigured` included); caller-supplied address headers are ignored
-- `GET /status` → forwarded count and quarantines by reason
+- `GET /status` → resolved and forwarded counts, and quarantines by reason
 - `POST /mcp` → JSON-RPC probe surface for smoke-alarm (`initialize`,
   `ingress/status`, `notifications/initialized`)
 
@@ -98,16 +98,25 @@ opens 61 of each and shows the churn cost.
 ## Install
 
 Network access alone produces a fail-closed listener. The install script
-refuses to run without `CONFIG`:
+refuses to run without `CONFIG`, and the binary refuses to start on a config
+that would be a public credential:
 
 ```sh
 cp configs/wan-ingress.example.json configs/wan-ingress.json
 cp configs/wan-ingress-agreements.example.json configs/agreements.json
-# fill in the token, the border HMAC key, the border URL and the registry URL
+# generate the two secrets — do not choose them
+openssl rand -base64 32   # token
+openssl rand -base64 32   # border_key
+# fill in the border URL, the registry URL, and (for a public bind) tls_cert/tls_key
 
 BINARY=./dist/wan-ingress-darwin-arm64 CONFIG=./configs/wan-ingress.json \
   ./scripts/install-wan-ingress.sh
 ```
+
+A non-loopback bind is refused unless the token and border key are at least 32
+bytes each **and** TLS is configured (or `allow_plaintext_wan` says TLS is
+terminated in front). Placeholder values are refused everywhere. This is a
+preflight, not a warning: the process exits with the reason and the fix.
 
 `./scripts/build-wan-ingress.sh` produces statically linked, stripped binaries
 for darwin/linux × amd64/arm64 with SHA-256SUMS. `DOCKER.md` covers the
@@ -131,14 +140,22 @@ whatever headers travel with it; that is asserted in
 
 ## Verification
 
-- `go test ./...` — green
-- `go vet ./...` — clean
+- `go test ./...` — green, including the adversarial suite in
+  [`internal/ingress/redteam_test.go`](internal/ingress/redteam_test.go)
+- `go vet ./...` and `golangci-lint run` — clean
+- `python3 -m unittest discover -s harness -p '*_test.py'` — the border's
+  freshness and signature contract
+- `./wan-ingress -check-config -config <file>` — the deployment preflight
+  (refuses placeholders, weak secrets and plaintext public binds)
 - five fuzz targets: `FuzzResolveName`, `FuzzQuarantineContract`,
   `FuzzBorderForward`, `FuzzCanonicalize`, `FuzzConfig`. Two parts of the
   feature are fuzz regressions: `"0 ."` was canonicalised with a trailing space
   on one read and differently on the next (fixed by trimming to a fixed point),
   and `%25` decoded to a canonical `%` that then failed to reparse (fixed by
   refusing a decoded percent). Both crashers are kept in `testdata/fuzz/`.
+- `go test ./...` includes the shipped example's refusal
+  (`TestShippedExampleConfigIsNotDeployable`), so a public credential cannot be
+  merged back in
 - `ocd-smoke-alarm validate -config configs/wan-ingress-alarm.yaml` — valid
 - `harness/spike.sh` — PASS, with the light transitions recorded above
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) enforces the PR 30s
@@ -147,6 +164,18 @@ whatever headers travel with it; that is asserted in
 
 Refusals are observable on `/status`; the registry (not the binary) judges the
 trust rung, and the alarm (not the binary) judges health.
+
+## Security
+
+[`SECURITY.md`](SECURITY.md) is the threat model: the attacks that were run
+against this binary, the tests that pin each outcome, the measured results, and
+the residual risks an operator accepts by putting it on a WAN. Read it before
+you expose the port.
+
+The short version: the token is a capability over a fixed routing table, not a
+password. It admits, it reads the agreed border addresses, and it forwards —
+so treat a leaked token as a leaked map. There is no rate limit and no per-caller
+audit log in the front; put it behind an edge that has both.
 
 ## Provenance
 

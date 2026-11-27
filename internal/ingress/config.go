@@ -19,6 +19,13 @@ type Config struct {
 	Token      string `json:"token,omitempty"`
 	BorderKey  string `json:"border_key,omitempty"`
 	SmokeAlarm string `json:"smoke_alarm,omitempty"`
+
+	// TLSCert and TLSCertKey terminate TLS in this process. A public bind
+	// without them is refused unless AllowPlaintextWAN is set, and that flag
+	// means "TLS is terminated in front of me", not "TLS does not matter".
+	TLSCert           string `json:"tls_cert,omitempty"`
+	TLSKey            string `json:"tls_key,omitempty"`
+	AllowPlaintextWAN bool   `json:"allow_plaintext_wan,omitempty"`
 }
 
 // LoadConfigFile reads a JSON config. Unknown keys are refused: a typo must not
@@ -27,7 +34,7 @@ func LoadConfigFile(path string) (Config, error) {
 	if path == "" {
 		return Config{}, nil
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // the operator supplies the config path
 	if err != nil {
 		return Config{}, fmt.Errorf("open config: %w", err)
 	}

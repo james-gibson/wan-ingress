@@ -20,13 +20,26 @@ import http.client
 import http.server
 import json
 import threading
+import time
 import urllib.parse
+
+# A signed envelope is fresh for this long. Without the window the signature
+# proves intent forever: a captured call replays cleanly, because every field
+# it covers is unchanged. The forwarder stamps the time; the border is the only
+# place that can refuse a stale one, so the check lives here.
+SKEW_SECONDS = 60
 
 
 def verify(key: bytes, path: str, namespace: str, body: bytes, headers) -> bool:
     signature = headers.get("X-Lab-Signature", "")
     timestamp = headers.get("X-Lab-Timestamp", "")
     if not signature or not timestamp:
+        return False
+    try:
+        stamped = int(timestamp)
+    except ValueError:
+        return False
+    if abs(time.time() - stamped) > SKEW_SECONDS:
         return False
     digest = hashlib.sha256(body).hexdigest()
     escaped = urllib.parse.quote(path, safe="/")

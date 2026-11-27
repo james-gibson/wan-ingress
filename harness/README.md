@@ -17,10 +17,10 @@ gave the same identity:
 
 | field | value |
 | --- | --- |
-| isotope | `8R0ZXcvOD_Z0xdQ0qGKEuA9ZlfLTGfF6rCxm4W_tF9o` |
-| tokens | 111 |
-| parts | 19 |
-| signature prefix (key `seed-42`) | `5205c3f5d2de34a8…` |
+| isotope | `VEy5JA5oqzwueYNPiRpoNBvzPYV_hnxlheiQA5h9tjg` |
+| tokens | 122 |
+| parts | 21 |
+| signature prefix (key `seed-42`) | `6ebfe5f8f5145c7e…` |
 
 Parts 10 and 11 were added by fuzz crashers found in `FuzzCanonicalize`:
 `"0 ."` was canonicalised with a trailing space, and `"%25"` decoded to `"%"` which

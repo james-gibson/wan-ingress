@@ -52,7 +52,7 @@ func TestObserverCountsByReason(t *testing.T) {
 	observer.Record(quarantine("ambiguous"))
 
 	recorder := httptest.NewRecorder()
-	observer.ServeStatus(true, recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	observer.ServeStatus(true, recorder, httptest.NewRequest(http.MethodGet, "/status", http.NoBody))
 	var counts statusBody
 	if err := json.Unmarshal(recorder.Body.Bytes(), &counts); err != nil {
 		t.Fatalf("decode status: %v", err)

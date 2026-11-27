@@ -121,6 +121,22 @@ Feature: WAN ingress — the resolver forwards only by agreement
     Then the command exits 0
     And the JSON field "result.capabilities.ingress" is "forward"
 
+  # A resolution is not a crossing. The monitor's green light means agreed
+  # traffic actually reached the border; a caller who only asks for a route has
+  # not sent one, and must not be able to turn the light green for free.
+  Scenario: a resolution is counted apart from a forward
+    Given a fresh process with an agreement mapping "42" to namespace "session-42" at an agreed border
+    When I run "sh -c 'curl -sS \"<addr>/resolve?name=42\" -H \"Authorization: Bearer <token>\" >/dev/null; curl -sS \"<addr>/status\"'"
+    Then the command exits 0
+    And the JSON field "resolved" is "1"
+    And the JSON field "forwarded" is "0"
+
+  Scenario: a resolution does not advertise forwarding to the monitor
+    Given a fresh process with an agreement mapping "42" to namespace "session-42" at an agreed border and a completed resolve
+    When I run "curl -sS -X POST '<addr>/mcp' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}'"
+    Then the command exits 0
+    And the body has no "result.capabilities.ingress" field
+
   Scenario: a stopped ingress is unhealthy to the monitor
     Given a smoke-alarm target watching a fresh ingress
     When I stop the ingress process

@@ -1,7 +1,8 @@
 {
   "addr": "0.0.0.0:8443",
   "agreements": "/etc/wan-ingress/agreements.json",
-  "token": "REPLACE_WITH_ADMISSION_TOKEN",
-  "border_key": "REPLACE_WITH_BORDER_HMAC_KEY",
-  "smoke_alarm": "http://smoke-alarm:19100"
+  "token": "REPLACE_WITH_RANDOM_32_BYTE_TOKEN",
+  "border_key": "REPLACE_WITH_RANDOM_32_BYTE_TOKEN",
+  "smoke_alarm": "http://smoke-alarm:19100",
+  "allow_plaintext_wan": true
 }

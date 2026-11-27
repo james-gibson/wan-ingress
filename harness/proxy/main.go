@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -85,7 +86,7 @@ func newHandler(registryURL, defaultName, token string, client *http.Client) htt
 		}
 		endpoint, err := resolve(r.Context(), registryURL, invite, client)
 		if err != nil {
-			log.Printf("resolve invite %q: %v", invite, err)
+			log.Printf("resolve invite %q: %v", invite, err) //nolint:gosec // G706: invite is %q-quoted
 			http.Error(w, "invite not resolvable", http.StatusBadGateway)
 			return
 		}
@@ -96,20 +97,21 @@ func newHandler(registryURL, defaultName, token string, client *http.Client) htt
 			return
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		proxy.Director = func(out *http.Request) {
+		proxy := &httputil.ReverseProxy{}
+		proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+			pr.SetXForwarded()
+			out := pr.Out
 			out.URL.Scheme = target.Scheme
 			out.URL.Host = target.Host
 			out.URL.Path = singleJoining(target.Path, out.URL.Path)
 			out.Host = target.Host
-			out.Header = out.Header.Clone()
 			if out.Header.Get("Authorization") == "" && token != "" {
 				out.Header.Set("Authorization", "Bearer "+token)
 			}
 			out.Header.Del(inviteHeader)
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("forward invite %q: %v", invite, err)
+			log.Printf("forward invite %q: %v", invite, err) //nolint:gosec // G706: invite is %q-quoted
 			http.Error(w, "egress unavailable", http.StatusBadGateway)
 		}
 		proxy.ServeHTTP(w, r)
@@ -132,5 +134,12 @@ func main() {
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	log.Printf("invite-proxy listening addr=%s registry=%s name=%s", ln.Addr(), *registry, *name)
-	log.Fatal(http.Serve(ln, newHandler(*registry, *name, *token, client)))
+	srv := &http.Server{
+		Handler:           newHandler(*registry, *name, *token, client),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("serve: %v", err)
+	}
 }

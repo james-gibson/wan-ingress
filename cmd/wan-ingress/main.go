@@ -35,11 +35,15 @@ var (
 	token      = flag.String("token", "", "bearer token required for WAN admission")
 	borderKey  = flag.String("border-key", "", "HMAC key for the signed border envelope")
 	registry   = flag.String("smoke-alarm", "", "smoke-alarm registry URL to register by name")
+	tlsCert    = flag.String("tls-cert", "", "PEM certificate for TLS termination")
+	tlsKey     = flag.String("tls-key", "", "PEM private key for TLS termination")
+	plaintext  = flag.Bool("allow-plaintext-wan", false, "bind publicly without TLS; TLS must be terminated in front")
 )
 
 func main() {
 	configPath := flag.String("config", "", "path to the JSON config (flags override its fields)")
 	heartbeat := flag.Duration("heartbeat", ingress.HeartbeatInterval, "registry renewal interval")
+	checkConfig := flag.Bool("check-config", false, "validate the config and exit without listening")
 	flag.Parse()
 
 	cfg, err := resolveConfig(*configPath)
@@ -47,6 +51,13 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	applyFlags(&cfg)
+	if checkErr := ingress.CheckDeployable(cfg); checkErr != nil {
+		log.Fatalf("refusing to start: %v", checkErr)
+	}
+	if *checkConfig {
+		log.Printf("config ok: addr=%s tls=%t agreements=%q", cfg.Addr, cfg.TLSCert != "", cfg.Agreements)
+		return
+	}
 	log.Printf("config loaded: agreements=%q ready=%t", cfg.Agreements, cfg.Token != "" && cfg.BorderKey != "")
 
 	observer := ingress.NewObserver()
@@ -68,7 +79,7 @@ func main() {
 	// Register only once the listener is up: a name is a claim that something is
 	// reachable, and the registry probes the endpoint it is given.
 	if cfg.SmokeAlarm != "" {
-		endpoint := "http://" + endpointHost(listener.Addr().String())
+		endpoint := endpointURL(cfg.TLSCert != "", listener.Addr().String())
 		status, body, err := ingress.Register(ctx, cfg.SmokeAlarm, registryName, endpoint)
 		if err != nil {
 			log.Printf("smoke-alarm registration failed: %v", err)
@@ -104,6 +115,10 @@ func main() {
 				log.Printf("reload rejected, keeping last good config: %v", err)
 				continue
 			}
+			if checkErr := ingress.CheckDeployable(next); checkErr != nil {
+				log.Printf("reload rejected, keeping last good config: %v", checkErr)
+				continue
+			}
 			srv, err := ingress.NewServer(next, observer)
 			if err != nil {
 				log.Printf("reload rejected, keeping last good policy: %v", err)
@@ -128,9 +143,17 @@ func main() {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("wan-ingress listening on %s", listener.Addr())
-	if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("serve: %v", err)
+	// A config reload may not rebind: the listener is the deployment, the
+	// policy is the swap. Say so instead of silently ignoring a changed addr.
+	log.Printf("wan-ingress listening on %s tls=%t plaintext_wan=%t", listener.Addr(), cfg.TLSCert != "", cfg.AllowPlaintextWAN)
+	var serveErr error
+	if cfg.TLSCert != "" {
+		serveErr = httpServer.ServeTLS(listener, cfg.TLSCert, cfg.TLSKey)
+	} else {
+		serveErr = httpServer.Serve(listener)
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatalf("serve: %v", serveErr) //nolint:gocritic // exiting; the deferred cleanups are best-effort
 	}
 }
 
@@ -159,12 +182,27 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.BorderKey = *borderKey
 		case "smoke-alarm":
 			cfg.SmokeAlarm = *registry
+		case "tls-cert":
+			cfg.TLSCert = *tlsCert
+		case "tls-key":
+			cfg.TLSKey = *tlsKey
+		case "allow-plaintext-wan":
+			cfg.AllowPlaintextWAN = *plaintext
 		}
 	})
 }
 
-// endpointHost turns a listener address into a URL host. A wildcard bind is a
-// bind address, never a destination a dependent should dial.
+// endpointURL turns a listener address into the URL a dependent dials. A
+// wildcard bind is a bind address, never a destination.
+func endpointURL(tls bool, addr string) string {
+	scheme := "http://"
+	if tls {
+		scheme = "https://"
+	}
+	return scheme + endpointHost(addr)
+}
+
+// endpointHost turns a listener address into a URL host.
 func endpointHost(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
