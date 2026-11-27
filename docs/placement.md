@@ -9,8 +9,8 @@ make the arithmetic checkable, not to be quoted as absolutes.
 
 **Status.** The placement rule and the cgroup are deployment practice and apply
 today. The signed grant is implemented (`internal/ingress/grant.go`,
-`cmd/wan-ingress-grant`) and is enforced live. The ticket ring is specified but
-not implemented, for the reason given in §4.
+`cmd/wan-ingress-grant`) and is enforced live, including per-shape budgets. The
+ticket ring is specified but not implemented, for the reason given in §4.
 
 ---
 
@@ -67,11 +67,16 @@ from a local constant:
 
 ```json
 {
-  "version": "wan-ingress-grant-v1",
+  "version": "wan-ingress-grant-v2",
   "namespace": "session-42",
   "batch": 1024,            // tickets in this grant
   "max_conns": 8000,        // connections the holder may admit
-  "expires": 1795755304,    // the grant dies here
+  "shapes": [               // per-body-class concurrency budgets
+    { "class": "small",  "max_bytes": 16384,   "max_conns": 16 },
+    { "class": "medium", "max_bytes": 262144,  "max_conns": 8  },
+    { "class": "bulk",   "max_bytes": 1048576, "max_conns": 4  }
+  ],
+  "expires": 1795755304,
   "issuer": "jack",
   "signature": "…"          // Ed25519 by the signing authority
 }
@@ -117,6 +122,33 @@ ring of **1** admits at most ~1,600 connections/s and queues everything behind
 it. A batch of 64 absorbs a 64-connection burst with no queue and refills below
 25%. A ring of 1 is therefore correct only for a low-arrival door, and it is
 honest about what it is: one admission per authority round trip.
+
+**Why the shape budgets are sized that way.** The concurrency knee is a property
+of the body class and the board, not a preference. Measured on dmz:
+
+| body class | knee | T at knee | at c=8 |
+| --- | --- | --- | --- |
+| 1 KiB | ~16 | 1,690/s | 1,504/s |
+| 64 KiB | ~4 | 608/s | 623/s (+2%, p95 4× worse) |
+| 1 MiB | ~2–4 | 131/s | 137/s (+5%, p50 1.9× worse) |
+
+Small requests are syscall-bound and need more in flight to fill the pipe; bulk
+requests are hash-bound and saturate as soon as the cores are busy. A single
+concurrency number is therefore wrong for every class: sized for 1 KiB it
+over-provisions bulk 4–8×; sized for bulk it queues small requests at a quarter
+of their capacity.
+
+**Classification is by `Content-Length`, before the body is read.** A request
+whose length is unknown (chunked) or larger than the biggest class takes the
+largest class, which carries the tightest budget. A request that would exceed its
+class is refused `429` with `Retry-After: 1` and counted as `shape_full` — refused
+rather than queued, because queueing a body is the memory the budget exists to
+bound. Verified on dmz: a 1 MiB flood at concurrency 8 against a bulk budget of 4
+produced 50 successes and 150 `shape_full`, with zero bodies held.
+
+The front does not invent budgets. A grant with no `shapes` means no per-class
+enforcement, because shape is an expectation the authority states, not one the
+front assumes.
 
 **Why the ring is still specified and not built.** A ticket is only meaningful
 where it is *checked* — at the border — and the batch bound can only be enforced
@@ -183,6 +215,7 @@ authority a general signing oracle and puts an RTT in front of every request.
 | cgroup / `Restart=always` | deployment practice — the unit files do not set limits yet |
 | `max-conns` | implemented (`-max-conns`, applied at the listener) |
 | signed grant (Ed25519) + live renew | implemented (`-grant`, `-grant-key`, `cmd/wan-ingress-grant`) |
+| per-shape budgets + edge classifier | implemented (`shapes` in the grant, `429 shape_full`) |
 | ticket ring | specified, not implemented — needs border-side counting (§4) |
 | splice mode | measured in a harness, not in the binary |
 

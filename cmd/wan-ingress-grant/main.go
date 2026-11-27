@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/james-gibson/wan-ingress/internal/ingress"
@@ -31,6 +33,8 @@ func main() {
 	maxConns := flag.Int("max-conns", 8000, "connections the holder may admit")
 	ttl := flag.Duration("ttl", 24*time.Hour, "how long the grant is valid")
 	issuer := flag.String("issuer", "", "label for the authority (recorded, not trusted)")
+	var shapes shapeList
+	flag.Var(&shapes, "shape", "class:max_bytes:max_conns (repeatable), e.g. small:16384:16")
 	out := flag.String("out", "", "write the grant here instead of stdout")
 	flag.Parse()
 
@@ -61,6 +65,7 @@ func main() {
 		Namespace: *namespace,
 		Batch:     *batch,
 		MaxConns:  *maxConns,
+		Shapes:    shapes,
 		Expires:   time.Now().Add(*ttl).Unix(),
 		Issuer:    *issuer,
 	})
@@ -77,6 +82,37 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("grant written to %s", *out)
+}
+
+// shapeList collects -shape flags in the form class:max_bytes:max_conns.
+type shapeList []ingress.ShapeLimit
+
+func (s *shapeList) String() string {
+	parts := make([]string, 0, len(*s))
+	for _, l := range *s {
+		parts = append(parts, fmt.Sprintf("%s:%d:%d", l.Class, l.MaxBytes, l.MaxConns))
+	}
+	return strings.Join(parts, ",")
+}
+
+func (s *shapeList) Set(value string) error {
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return fmt.Errorf("want class:max_bytes:max_conns, got %q", value)
+	}
+	maxBytes, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || maxBytes <= 0 {
+		return fmt.Errorf("max_bytes %q is not a positive integer", parts[1])
+	}
+	maxConns, err := strconv.Atoi(parts[2])
+	if err != nil || maxConns <= 0 {
+		return fmt.Errorf("max_conns %q is not a positive integer", parts[2])
+	}
+	if parts[0] == "" {
+		return fmt.Errorf("class is empty")
+	}
+	*s = append(*s, ingress.ShapeLimit{Class: parts[0], MaxBytes: maxBytes, MaxConns: maxConns})
+	return nil
 }
 
 func privateKey(text string) (ed25519.PrivateKey, error) {

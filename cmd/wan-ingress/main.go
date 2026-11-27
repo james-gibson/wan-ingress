@@ -82,6 +82,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("load policy: %v", err)
 	}
+	server.Shapes = ingress.NewShapeSet(shapesOf(held))
+	logShapes("boot", server.Shapes)
 	runtime := &ingress.Runtime{}
 	runtime.Swap(server)
 
@@ -143,17 +145,20 @@ func main() {
 				continue
 			}
 			// A renewed grant is a live statement: apply it without a restart.
-			if conns, held, gErr := capacity(next); gErr != nil {
+			conns, nextGrant, gErr := capacity(next)
+			if gErr != nil {
 				log.Printf("grant rejected, keeping the last good capacity: %v", gErr)
 			} else {
 				limiter.SetLimit(conns)
-				log.Printf("capacity: %d connections (grant=%t)", conns, held != nil)
+				log.Printf("capacity: %d connections (grant=%t)", conns, nextGrant != nil)
 			}
 			srv, err := ingress.NewServer(next, observer)
 			if err != nil {
 				log.Printf("reload rejected, keeping last good policy: %v", err)
 				continue
 			}
+			srv.Shapes = ingress.NewShapeSet(shapesOf(nextGrant))
+			logShapes("reload", srv.Shapes)
 			runtime.Swap(srv)
 			log.Printf("reloaded config: agreements=%q ready=%t", next.Agreements, next.Token != "" && next.BorderKey != "")
 		}
@@ -232,6 +237,28 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.GrantKey = *grantKey
 		}
 	})
+}
+
+// shapesOf lists the classes a grant carries. A missing grant has no shapes,
+// which means no per-class budget: shape enforcement is something the authority
+// grants, not something the front assumes.
+func shapesOf(g *ingress.Grant) []ingress.ShapeLimit {
+	if g == nil {
+		return nil
+	}
+	return g.Shapes
+}
+
+func logShapes(when string, set *ingress.ShapeSet) {
+	limits := set.Limits()
+	if len(limits) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(limits))
+	for _, l := range limits {
+		parts = append(parts, fmt.Sprintf("%s<=%dB:%d", l.Class, l.MaxBytes, l.MaxConns))
+	}
+	log.Printf("%s shapes: %s", when, strings.Join(parts, " "))
 }
 
 // fallbackConns is what an ingress gets when it has no valid grant. It is

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -18,27 +20,50 @@ import (
 // requires the key, and a holder of the key can mint. A front that verifies with
 // a public key can check a grant but cannot forge one, so "go faster" is
 // something the authority says and not something the front decides.
-const grantVersion = "wan-ingress-grant-v1"
+const grantVersion = "wan-ingress-grant-v2"
 
 // ErrGrant is the typed refusal for a grant that does not verify.
 var ErrGrant = errors.New("grant does not verify")
 
+// ShapeLimit is a capacity class: the connections this class may occupy at
+// once. The class is chosen by body size, because the measured knee differs by
+// an order of magnitude between a 1 KiB request and a 1 MiB one, so a single
+// concurrency number is wrong for every class.
+type ShapeLimit struct {
+	Class    string `json:"class"`
+	MaxBytes int64  `json:"max_bytes"`
+	MaxConns int    `json:"max_conns"`
+}
+
 // Grant is the capability the authority issues.
 type Grant struct {
-	Version   string `json:"version"`
-	Namespace string `json:"namespace"`
-	Batch     int    `json:"batch"`
-	MaxConns  int    `json:"max_conns"`
-	Expires   int64  `json:"expires"`
-	Issuer    string `json:"issuer,omitempty"`
-	Signature string `json:"signature"`
+	Version   string       `json:"version"`
+	Namespace string       `json:"namespace"`
+	Batch     int          `json:"batch"`
+	MaxConns  int          `json:"max_conns"`
+	Shapes    []ShapeLimit `json:"shapes,omitempty"`
+	Expires   int64        `json:"expires"`
+	Issuer    string       `json:"issuer,omitempty"`
+	Signature string       `json:"signature"`
 }
 
 // Message is the signed material. Every field that grants something is inside
 // it, so none can be edited in transit.
 func (g Grant) Message() []byte {
-	return []byte(fmt.Sprintf("%s\n%s\n%d\n%d\n%d\n%s",
-		grantVersion, g.Namespace, g.Batch, g.MaxConns, g.Expires, g.Issuer))
+	shapes := append([]ShapeLimit(nil), g.Shapes...)
+	sort.Slice(shapes, func(i, j int) bool {
+		if shapes[i].MaxBytes != shapes[j].MaxBytes {
+			return shapes[i].MaxBytes < shapes[j].MaxBytes
+		}
+		return shapes[i].Class < shapes[j].Class
+	})
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n%s\n%d\n%d\n%d\n%s\n",
+		grantVersion, g.Namespace, g.Batch, g.MaxConns, g.Expires, g.Issuer)
+	for _, s := range shapes {
+		fmt.Fprintf(&b, "%s:%d:%d\n", s.Class, s.MaxBytes, s.MaxConns)
+	}
+	return []byte(b.String())
 }
 
 // SignGrant fills the version and signature. The authority calls this; the front
@@ -60,6 +85,16 @@ func VerifyGrant(pub ed25519.PublicKey, g Grant, now time.Time) error {
 	}
 	if g.Batch <= 0 || g.MaxConns <= 0 {
 		return fmt.Errorf("%w: batch and max_conns must be positive", ErrGrant)
+	}
+	seen := make(map[string]bool, len(g.Shapes))
+	for _, s := range g.Shapes {
+		if s.Class == "" || s.MaxBytes <= 0 || s.MaxConns <= 0 {
+			return fmt.Errorf("%w: shape %q needs a class, max_bytes and max_conns", ErrGrant, s.Class)
+		}
+		if seen[s.Class] {
+			return fmt.Errorf("%w: shape class %q appears twice", ErrGrant, s.Class)
+		}
+		seen[s.Class] = true
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(g.Signature)
 	if err != nil {

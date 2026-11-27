@@ -125,6 +125,20 @@ wan-ingress-grant -key <b64> -namespace session-42 \
   "grant_key": "<authority public key>" }
 ```
 
+A grant may also carry per-body-class budgets, because the measured concurrency
+knee differs by an order of magnitude between a 1 KiB request and a 1 MiB one:
+
+```sh
+wan-ingress-grant -key <b64> -namespace session-42 -max-conns 8000 \
+  -shape small:16384:16 -shape medium:262144:8 -shape bulk:1048576:4
+```
+
+The class is chosen from `Content-Length` before the body is read. A request that
+would exceed its class gets `429` with `Retry-After: 1` and is counted as
+`shape_full` — **refused, not queued**, because queueing a body is the memory the
+budget exists to bound. A grant without `shapes` enforces no class budgets: shape
+is an expectation the authority states.
+
 The front verifies with the **public** key and cannot mint: an HMAC would let a
 front that can check a grant also forge one. The grant covers namespace, batch,
 connection ceiling and expiry, and a renewed grant is applied on `SIGHUP` —

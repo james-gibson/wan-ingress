@@ -19,6 +19,7 @@ type Server struct {
 	Node       string
 	Peers      PeerSet
 	Terminator PeerSet
+	Shapes     *ShapeSet
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -105,6 +106,18 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	// A shape budget is taken before the body is read: refusing after reading is
+	// the memory cost the budget exists to avoid.
+	release, _, ok := s.Shapes.Acquire(r.ContentLength)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		refusal := quarantine("shape_full")
+		s.Observer.Record(refusal)
+		writeDecision(w, http.StatusTooManyRequests, refusal)
+		return
+	}
+	defer release()
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody+1))
 	if err != nil || len(body) > maxForwardBody {
