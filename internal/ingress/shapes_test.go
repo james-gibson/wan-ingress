@@ -192,3 +192,72 @@ func TestGrantDecodesShapes(t *testing.T) {
 }
 
 func nowPlusHour() time.Time { return time.Now().Add(time.Hour) }
+
+// A declaration is a claim that can be scored: it must name a configured class
+// and must cover the body it carries.
+func TestDeclaredShapeMustBeKnownAndCoverTheBody(t *testing.T) {
+	set := testShapes()
+	if _, err := set.Decide("nope", 1024); err == nil {
+		t.Fatal("an unknown class was accepted")
+	}
+	if _, err := set.Decide("small", 64<<10); err == nil {
+		t.Fatal("a body larger than its declared class was accepted")
+	}
+	limit, err := set.Decide("bulk", 1024)
+	if err != nil {
+		t.Fatalf("declaring a larger class was refused: %v", err)
+	}
+	if limit.Class != "bulk" {
+		t.Fatalf("class = %q, want bulk", limit.Class)
+	}
+}
+
+// The declared class decides the budget, not the body size: a small body that
+// declares bulk spends the bulk budget.
+func TestDeclaredClassSpendsItsOwnBudget(t *testing.T) {
+	border := &headerCapture{}
+	borderSrv := httptest.NewServer(border)
+	defer borderSrv.Close()
+
+	resolver := agreementFor(t, borderSrv.URL+"/cluster")
+	server := &Server{
+		Resolver:  resolver,
+		Forwarder: &Forwarder{BorderKey: []byte(testKey), Policy: resolver.PolicyIsotope()},
+		Token:     testToken,
+		Observer:  NewObserver(),
+		Shapes:    testShapes(),
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+
+	// Hold every bulk slot, then ask as a small body that declares bulk.
+	bulk, err := server.Shapes.Decide("bulk", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held []func()
+	for i := 0; i < bulk.MaxConns; i++ {
+		release, ok := server.Shapes.Take(bulk)
+		if !ok {
+			t.Fatalf("bulk slot %d unavailable", i)
+		}
+		held = append(held, release)
+	}
+	defer func() {
+		for _, release := range held {
+			release()
+		}
+	}()
+	headers := authHeaders()
+	headers[shapeHeader] = "bulk"
+	status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("fifth declared-bulk = %d (%s), want 429", status, body)
+	}
+	// The small budget is untouched.
+	headers = authHeaders()
+	headers[shapeHeader] = "small"
+	if status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers); status != http.StatusOK {
+		t.Fatalf("small after bulk saturation = %d (%s)", status, body)
+	}
+}

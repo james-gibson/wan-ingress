@@ -22,6 +22,7 @@ NAMESPACE = "session-42"
 BODY = b'{"jsonrpc":"2.0","id":1,"method":"adhd.status"}'
 POLICY = "cG9saWN5LWlzb3RvcGU"
 ROUTE_PATH = "wan-a"
+CANARY = "deadbeef"
 
 
 class Headers(dict):
@@ -34,7 +35,8 @@ def envelope(stamp: int) -> Headers:
     escaped = urllib.parse.quote(PATH_BASE, safe="/")
     signature = hmac.new(
         KEY,
-        ("POST\n%s\n%s\n%s\n%s\n%s\n%s" % (escaped, NAMESPACE, POLICY, ROUTE_PATH, digest, stamp)).encode(),
+        ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s" % (
+            escaped, NAMESPACE, POLICY, ROUTE_PATH, CANARY, digest, stamp)).encode(),
         hashlib.sha256,
     ).hexdigest()
     return Headers({
@@ -42,6 +44,7 @@ def envelope(stamp: int) -> Headers:
         "X-Lab-Timestamp": str(stamp),
         "X-Lab-Policy": POLICY,
         "X-Lab-Path": ROUTE_PATH,
+        "X-Lab-Canary": CANARY,
     })
 
 
@@ -71,6 +74,11 @@ class BorderVerifyTest(unittest.TestCase):
     def test_a_different_policy_is_refused(self):
         headers = envelope(int(time.time()))
         headers["X-Lab-Policy"] = "b3RoZXItcG9saWN5"
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
+
+    def test_a_rewritten_canary_is_refused(self):
+        headers = envelope(int(time.time()))
+        headers["X-Lab-Canary"] = "other"
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
     def test_a_rewritten_path_is_refused(self):

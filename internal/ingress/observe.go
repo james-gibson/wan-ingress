@@ -13,6 +13,7 @@ type Observer struct {
 	mu          sync.Mutex
 	resolved    uint64
 	forwarded   uint64
+	borderSeen  uint64 // highest count the border has reported
 	quarantined map[string]uint64
 }
 
@@ -79,6 +80,39 @@ func (o *Observer) SnapshotAll() (uint64, uint64, map[string]uint64) {
 	return resolved, forwarded, quarantined
 }
 
+// ObserveBorder records the border's own request count. The highest value wins:
+// requests complete out of order, and the max is the honest lower bound on what
+// the border has seen.
+func (o *Observer) ObserveBorder(seen uint64) {
+	if seen == 0 {
+		return
+	}
+	o.mu.Lock()
+	if seen > o.borderSeen {
+		o.borderSeen = seen
+	}
+	o.mu.Unlock()
+}
+
+// BorderSeen is the border's count as last observed.
+func (o *Observer) BorderSeen() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.borderSeen
+}
+
+// WitnessGap is the difference between what this front forwarded and what the
+// border says it received. A persistent gap is a divergence between the two
+// invariants (lab/SPLASH.md), which is the finding, not the number.
+func (o *Observer) WitnessGap() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.forwarded <= o.borderSeen {
+		return 0
+	}
+	return o.forwarded - o.borderSeen
+}
+
 // Resolved is the count of agreed names that were resolved but not forwarded.
 func (o *Observer) Resolved() uint64 {
 	resolved, _, _ := o.SnapshotAll()
@@ -94,6 +128,8 @@ func (o *Observer) Forwarded() uint64 {
 type statusBody struct {
 	Resolved    uint64            `json:"resolved"`
 	Forwarded   uint64            `json:"forwarded"`
+	BorderSeen  uint64            `json:"border_seen"`
+	WitnessGap  uint64            `json:"witness_gap"`
 	Quarantined map[string]uint64 `json:"quarantined"`
 	Ready       bool              `json:"ready"`
 }
@@ -103,7 +139,9 @@ func (o *Observer) ServeStatus(ready bool, w http.ResponseWriter, _ *http.Reques
 	resolved, forwarded, quarantined := o.SnapshotAll()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(statusBody{
-		Resolved: resolved, Forwarded: forwarded, Quarantined: quarantined, Ready: ready,
+		Resolved: resolved, Forwarded: forwarded,
+		BorderSeen: o.BorderSeen(), WitnessGap: o.WitnessGap(),
+		Quarantined: quarantined, Ready: ready,
 	})
 }
 

@@ -34,6 +34,9 @@ func (c *headerCapture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.paths = append(c.paths, r.URL.Path)
 	c.methods = append(c.methods, r.Method)
 	c.mu.Unlock()
+	if canary := r.Header.Get("X-Lab-Canary"); canary != "" {
+		w.Header().Set("X-Lab-Canary", canary)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

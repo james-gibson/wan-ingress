@@ -217,6 +217,10 @@ authority a general signing oracle and puts an RTT in front of every request.
 | signed grant (Ed25519) + live renew | implemented (`-grant`, `-grant-key`, `cmd/wan-ingress-grant`) |
 | per-shape budgets + edge classifier | implemented (`shapes` in the grant, `429 shape_full`) |
 | ticket ring | specified, not implemented — needs border-side counting (§4) |
+| forced-inclusion canary | implemented (`X-Lab-Canary`, echo required, `canary_lost`) |
+| second witness | implemented (`X-Lab-Seen`, `/status.border_seen`, `.witness_gap`) |
+| declared shape | implemented (`X-Lab-Shape`, `shape_mismatch` / `shape_unknown`) |
+| eviction hook | implemented (`-ban-log`, `-never-ban`; enforcement stays on the host) |
 | splice mode | measured in a harness, not in the binary |
 
 The next code change is inheriting the read/idle timeouts on any raw path (splice

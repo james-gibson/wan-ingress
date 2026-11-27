@@ -37,7 +37,7 @@ shell-to-gherkin canon validated, and the signature above is reproduced by
 - `GET /resolve?name=<raw>` → agreed route, or `422` with `malformed` / `unknown` / `ambiguous`
 - `POST /forward?name=<raw>` → HMAC-signed border envelope, or a typed refusal
   (`border_unconfigured` included); caller-supplied address headers are ignored
-- `GET /status` → resolved and forwarded counts, and quarantines by reason
+- `GET /status` → resolved, forwarded, `border_seen`, `witness_gap`, and quarantines by reason
 - `GET /policy` → the derived isotope of the agreement file, and its size; never
   a route, address or namespace
 - `POST /mcp` → JSON-RPC probe surface for smoke-alarm (`initialize`,

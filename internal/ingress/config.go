@@ -43,6 +43,12 @@ type Config struct {
 	Grant    string `json:"grant,omitempty"`
 	GrantKey string `json:"grant_key,omitempty"`
 
+	// BanLog is a file of ban lines a host-side filter (fail2ban) can read, and
+	// NeverBan is the allowlist. Enforcement stays outside the front so a bad
+	// threshold cannot lock an operator out of the fix.
+	BanLog   string   `json:"ban_log,omitempty"`
+	NeverBan []string `json:"never_ban,omitempty"`
+
 	// Terminator is the TLS terminator or load balancer in front of this
 	// instance (nginx, a cloud LB). It relays arbitrary clients, so a path
 	// arriving from it is a *client's* header, not a peer's: it is ignored even

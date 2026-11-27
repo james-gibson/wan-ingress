@@ -45,9 +45,11 @@ def verify(key: bytes, path: str, namespace: str, body: bytes, headers) -> bool:
     escaped = urllib.parse.quote(path, safe="/")
     policy = headers.get("X-Lab-Policy", "")
     route_path = headers.get("X-Lab-Path", "")
+    canary = headers.get("X-Lab-Canary", "")
     expected = hmac.new(
         key,
-        ("POST\n%s\n%s\n%s\n%s\n%s\n%s" % (escaped, namespace, policy, route_path, digest, timestamp)).encode(),
+        ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s" % (
+            escaped, namespace, policy, route_path, canary, digest, timestamp)).encode(),
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(signature, expected)
@@ -159,9 +161,17 @@ def make_handler(key: bytes, state: BorderState):
                 self._json(403, {"error": "bad border signature"})
                 return
             status, payload = state.forward(body)
+            with state.lock:
+                seen = state.requests
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
+            # Forced inclusion: the border carries the marker forward and reports
+            # its own count, so the front is not the only witness.
+            canary = self.headers.get("X-Lab-Canary", "")
+            if canary:
+                self.send_header("X-Lab-Canary", canary)
+            self.send_header("X-Lab-Seen", str(seen))
             if state.mode == "new":
                 self.send_header("Connection", "close")
             self.end_headers()

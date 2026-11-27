@@ -166,6 +166,27 @@ discovers.
    policy is what `SIGHUP` swaps. Changing `addr` in the file has no effect
    until a restart, which is logged.
 
+## Eviction
+
+Refusals are counted per address and, past a threshold in a window, written to a
+line a host filter can read:
+
+```
+2026-11-27T04:20:00Z wan-ingress ban ip=192.0.2.5 reason=untrusted count=20
+```
+
+A fail2ban filter:
+
+```ini
+[Definition]
+failregex = ^.*wan-ingress ban ip=<HOST> reason=[a-z_]+ count=\d+$
+```
+
+`never_ban` is the allowlist. Put the jump host in it — a ban on the machine an
+operator reaches the lab through removes the way to undo the ban. Enforcement is
+deliberately outside the front: a bad threshold must not be able to lock an
+operator out of the fix.
+
 ## Before you put it on a WAN
 
 - [ ] `token` and `border_key` generated, ≥ 32 random bytes, and not in git

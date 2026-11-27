@@ -43,6 +43,8 @@ var (
 	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs of ingress peers whose route path is believed")
 	terminator = flag.String("terminator", "", "comma-separated IPs/CIDRs of the TLS terminator/LB in front")
 	maxConns   = flag.Int("max-conns", 0, "hard cap on accepted connections (0 = unbounded)")
+	banLog     = flag.String("ban-log", "", "file of ban lines for a host filter (fail2ban); empty disables")
+	neverBan   = flag.String("never-ban", "", "comma-separated IPs/CIDRs that can never be banned (the jump host)")
 	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
 	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
 )
@@ -84,12 +86,18 @@ func main() {
 	}
 	server.Shapes = ingress.NewShapeSet(shapesOf(held))
 	logShapes("boot", server.Shapes)
+	bans, err := banLogFor(cfg)
+	if err != nil {
+		log.Fatalf("ban log: %v", err)
+	}
+	server.Bans = bans
+	defer func() { _ = bans.Close() }()
 	runtime := &ingress.Runtime{}
 	runtime.Swap(server)
 
 	listener, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
-		log.Fatalf("listen %s: %v", cfg.Addr, err)
+		log.Fatalf("listen %s: %v", cfg.Addr, err) //nolint:gocritic // exiting; the ban log flush is best-effort
 	}
 	// The cap is applied to the listener, not the handler: unbounded connections
 	// cost memory before a request is ever parsed. The limiter is kept so a
@@ -159,6 +167,12 @@ func main() {
 			}
 			srv.Shapes = ingress.NewShapeSet(shapesOf(nextGrant))
 			logShapes("reload", srv.Shapes)
+			if nextBan, bErr := banLogFor(next); bErr != nil {
+				log.Printf("ban log rejected, keeping the last good one: %v", bErr)
+				srv.Bans = bans
+			} else {
+				srv.Bans = nextBan
+			}
 			runtime.Swap(srv)
 			log.Printf("reloaded config: agreements=%q ready=%t", next.Agreements, next.Token != "" && next.BorderKey != "")
 		}
@@ -235,8 +249,30 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.Grant = *grant
 		case "grant-key":
 			cfg.GrantKey = *grantKey
+		case "ban-log":
+			cfg.BanLog = *banLog
+		case "never-ban":
+			cfg.NeverBan = splitList(*neverBan)
 		}
 	})
+}
+
+// banLogFor opens the ban log from config. Enforcement happens on the host; the
+// front only names the address and the reason.
+func banLogFor(cfg ingress.Config) (*ingress.BanLog, error) {
+	never, err := ingress.ParsePeers(cfg.NeverBan)
+	if err != nil {
+		return nil, err
+	}
+	bans := ingress.NewBanLog(cfg.BanLog, never)
+	if bans == nil {
+		return nil, nil
+	}
+	if err := bans.Err(); err != nil {
+		return nil, err
+	}
+	log.Printf("ban log: %s (never_ban=%d ranges)", cfg.BanLog, len(never))
+	return bans, nil
 }
 
 // shapesOf lists the classes a grant carries. A missing grant has no shapes,

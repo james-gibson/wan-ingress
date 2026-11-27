@@ -14,6 +14,7 @@ import (
 type capture struct {
 	mu   sync.Mutex
 	seen []captured
+	n    uint64
 }
 
 type captured struct {
@@ -22,12 +23,19 @@ type captured struct {
 
 func (c *capture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
+	c.n++
+	n := c.n
 	c.seen = append(c.seen, captured{
 		host: r.Host, path: r.URL.Path, method: r.Method,
 		signature: r.Header.Get("X-Lab-Signature"),
 		namespace: r.Header.Get("X-Lab-Namespace"),
 	})
 	c.mu.Unlock()
+	// A real border carries the marker forward and reports its own count.
+	if canary := r.Header.Get("X-Lab-Canary"); canary != "" {
+		w.Header().Set("X-Lab-Canary", canary)
+	}
+	w.Header().Set("X-Lab-Seen", fmt.Sprintf("%d", n))
 	w.WriteHeader(http.StatusOK)
 }
 

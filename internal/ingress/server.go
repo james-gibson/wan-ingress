@@ -20,6 +20,7 @@ type Server struct {
 	Peers      PeerSet
 	Terminator PeerSet
 	Shapes     *ShapeSet
+	Bans       *BanLog
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -63,9 +64,7 @@ func (s *Server) ready() bool {
 
 func (s *Server) serveResolve(w http.ResponseWriter, r *http.Request) {
 	if !Admit(r.Header.Get("Authorization"), s.Token) {
-		refusal := quarantine("untrusted")
-		s.Observer.Record(refusal)
-		writeDecision(w, http.StatusForbidden, refusal)
+		s.refuse(w, r, http.StatusForbidden, "untrusted")
 		return
 	}
 
@@ -80,9 +79,7 @@ func (s *Server) serveResolve(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 	if !Admit(r.Header.Get("Authorization"), s.Token) {
-		refusal := quarantine("untrusted")
-		s.Observer.Record(refusal)
-		writeDecision(w, http.StatusForbidden, refusal)
+		s.refuse(w, r, http.StatusForbidden, "untrusted")
 		return
 	}
 
@@ -94,9 +91,7 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.Forwarder.Ready() {
-		refusal := quarantine("border_unconfigured")
-		s.Observer.Record(refusal)
-		writeDecision(w, http.StatusUnprocessableEntity, refusal)
+		s.refuse(w, r, http.StatusUnprocessableEntity, "border_unconfigured")
 		return
 	}
 
@@ -107,34 +102,50 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A shape budget is taken before the body is read: refusing after reading is
-	// the memory cost the budget exists to avoid.
-	release, _, ok := s.Shapes.Acquire(r.ContentLength)
+	// The class is decided from the declared header and the body length, and the
+	// budget is taken before the body is read: refusing after reading is the
+	// memory cost the budget exists to avoid.
+	limit, err := s.Shapes.Decide(r.Header.Get(shapeHeader), r.ContentLength)
+	if err != nil {
+		reason := "shape_unknown"
+		if errors.Is(err, ErrShapeMismatch) {
+			reason = "shape_mismatch"
+		}
+		s.refuse(w, r, http.StatusUnprocessableEntity, reason)
+		return
+	}
+	release, ok := s.Shapes.Take(limit)
 	if !ok {
+		// A retryable refusal with a constant shape. The budget itself is
+		// published on /policy, so probing cannot discover anything hidden: the
+		// signal an attacker wants is already public.
 		w.Header().Set("Retry-After", "1")
-		refusal := quarantine("shape_full")
-		s.Observer.Record(refusal)
-		writeDecision(w, http.StatusTooManyRequests, refusal)
+		w.Header().Set("Cache-Control", "no-store")
+		s.refuse(w, r, http.StatusTooManyRequests, "shape_full")
 		return
 	}
 	defer release()
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody+1))
 	if err != nil || len(body) > maxForwardBody {
-		refusal := quarantine("malformed")
-		s.Observer.Record(refusal)
-		writeDecision(w, http.StatusUnprocessableEntity, refusal)
+		s.refuse(w, r, http.StatusUnprocessableEntity, "malformed")
 		return
 	}
-	status, err := s.Forwarder.ForwardPath(r.Context(), *decision.Route, rawName, body, path)
+	outcome, err := s.Forwarder.ForwardObserved(r.Context(), *decision.Route, rawName, body, path)
 	if err != nil {
-		refusal := quarantine("upstream")
-		s.Observer.Record(refusal)
-		writeDecision(w, http.StatusBadGateway, refusal)
+		s.refuse(w, r, http.StatusBadGateway, "upstream")
+		return
+	}
+	s.Observer.ObserveBorder(outcome.BorderSeen)
+	if !outcome.CanaryEchoed {
+		// The border accepted the request but did not carry the marker into its
+		// answer. That is a forced-inclusion failure: the written record and the
+		// received record disagree.
+		s.refuse(w, r, http.StatusBadGateway, "canary_lost")
 		return
 	}
 
-	forwarded := Decision{Decision: "forward", Route: decision.Route, UpstreamStatus: status}
+	forwarded := Decision{Decision: "forward", Route: decision.Route, UpstreamStatus: outcome.Status}
 	s.Observer.Record(forwarded)
 	writeDecision(w, http.StatusOK, forwarded)
 }
@@ -145,7 +156,19 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 // the node that computed it is not checkable (lab/SPLASH.md, *Derived values*).
 func (s *Server) servePolicy(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.Resolver.Summary())
+	_ = json.NewEncoder(w).Encode(policyBody{
+		PolicySummary: s.Resolver.Summary(),
+		Shapes:        s.Shapes.Limits(),
+	})
+}
+
+// policyBody is the public view of what this node is running. The shape budgets
+// are published on purpose: a capacity that is already inferable by probing is
+// better published than probed, and publishing removes the timing oracle without
+// hiding anything that was ever secret.
+type policyBody struct {
+	PolicySummary
+	Shapes []ShapeLimit `json:"shapes,omitempty"`
 }
 
 // routePath extends the route history with this node. A caller-supplied path is
@@ -159,7 +182,7 @@ func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]string, bo
 	if trusted {
 		parsed, err := ParsePath(r.Header.Get(pathHeader))
 		if err != nil {
-			s.refuse(w, "malformed")
+			s.refuse(w, r, http.StatusUnprocessableEntity, "malformed")
 			return nil, false
 		}
 		carried = parsed
@@ -170,17 +193,22 @@ func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]string, bo
 		if !errors.Is(err, ErrPathLoop) {
 			reason = "malformed"
 		}
-		s.refuse(w, reason)
+		s.refuse(w, r, http.StatusUnprocessableEntity, reason)
 		return nil, false
 	}
 	return path, true
 }
 
-// refuse records and answers one typed quarantine.
-func (s *Server) refuse(w http.ResponseWriter, reason string) {
+// refuse records and answers one typed quarantine, and offers the caller to the
+// ban log. Recording is centralized so every refusal is counted and attributable
+// in one place.
+func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, reason string) {
 	refusal := quarantine(reason)
 	s.Observer.Record(refusal)
-	writeDecision(w, http.StatusUnprocessableEntity, refusal)
+	if s.Bans != nil && r != nil {
+		s.Bans.Record(r.RemoteAddr, reason)
+	}
+	writeDecision(w, status, refusal)
 }
 
 func writeDecision(w http.ResponseWriter, status int, decision Decision) {
