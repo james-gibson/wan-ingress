@@ -104,7 +104,7 @@ func main() {
 	logShapes("boot", server.Shapes)
 	bans, err := banLogFor(cfg)
 	if err != nil {
-		log.Fatalf("ban log: %v", err)
+		log.Fatalf("ban log: %v", err) //nolint:gocritic // exiting; the capture flush is best-effort
 	}
 	server.Bans = bans
 	defer func() { _ = bans.Close() }()

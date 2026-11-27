@@ -57,7 +57,7 @@ func TestDumpCapturesRefusalsNotForwards(t *testing.T) {
 	defer srv.Close()
 
 	// A scanner with no credential.
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/wp-login.php", nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/wp-login.php", http.NoBody)
 	req.Header.Set("User-Agent", "masscan")
 	if resp, err := srv.Client().Do(req); err == nil {
 		_ = resp.Body.Close()
@@ -104,7 +104,7 @@ func TestDumpNeverWritesTheToken(t *testing.T) {
 	srv := httptest.NewServer(server.Handler())
 	defer srv.Close()
 
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/resolve?name=42", nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/resolve?name=42", http.NoBody)
 	req.Header.Set("Authorization", "Bearer secret-token-value")
 	req.Header.Set("Cookie", "session=abc")
 	if resp, err := srv.Client().Do(req); err == nil {

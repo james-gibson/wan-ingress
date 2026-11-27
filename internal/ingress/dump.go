@@ -150,11 +150,11 @@ func dumpHeaders(h http.Header) map[string]string {
 	return out
 }
 
-func clip(s string, max int) string {
-	if len(s) <= max {
+func clip(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	return s[:max]
+	return s[:limit]
 }
 
 // Close flushes and closes the capture file.
