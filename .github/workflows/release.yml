@@ -1,0 +1,61 @@
+name: Release
+
+# One publisher, one tag: pushing a v* tag is the only way a release is made, so
+# what is published is what the tag points at. The workflow runs the same tests
+# the PR gate runs before it builds anything, because a release that skips its
+# own gate is a release nobody checked.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go vet ./...
+      - run: python3 -m unittest discover -s harness -p '*_test.py' -v
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert the assets `lezz install` looks for
+        shell: bash
+        run: |
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' > assets.txt
+          cat assets.txt
+          for want in \
+            wan-ingress_linux_amd64.tar.gz \
+            wan-ingress_linux_arm64.tar.gz \
+            wan-ingress_darwin_amd64.tar.gz \
+            wan-ingress_darwin_arm64.tar.gz \
+            checksums.txt; do
+            grep -qx "$want" assets.txt || { echo "missing release asset: $want" >&2; exit 1; }
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

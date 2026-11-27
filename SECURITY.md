@@ -62,9 +62,89 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | over-long name | 254 bytes | `422 malformed`, never truncated | `TestParseName` |
 | oversized body | > 1 MiB | `422`, border never contacted | `TestOversizedBodyIsRefusedBeforeTheBorder` |
 | duplicate `name` parameters | `?name=42&name=evil` | first wins for both resolve and forward | `TestDuplicateNameParametersResolveAndForwardTheSameName` |
-| stale captured envelope | `X-Lab-Timestamp` outside ±60s | border refuses | `harness/border_adapter_test.py` |
+| stale captured envelope | `X-Lab-Timestamp` outside the window | border refuses | `harness/border_adapter_test.py` |
+| a route past its span | `X-Lab-Route-Start` | `422 route_dissolved`, border never contacted | `TestDissolvedRouteIsRefusedBeforeTheBorder` |
+| two edges that disagree on "now" | stamped hop vs `peer_window_ms` | `422 clock_disagreement` | `TestPeerWindowRefusesAClockDisagreement` |
+| a peer hop with no stamp | missing `@ms` | `422 clock_disagreement` — silence is not agreement | `TestUnstampedPeerHopIsADisagreement` |
+| a hop backdating a route | the start is inside the signature | the border's signature check fails | `harness/border_adapter_test.py` |
 | a resolution counted as a forward | the monitor's green light | only `/forward` advertises `ingress/forward` | `TestResolveAloneDoesNotAdvertiseForwarding` |
 | anonymous status scraping | `/status`, `/mcp`, `/readyz` | counters and readiness only; no route, address or namespace | `TestAnonymousSurfacesLeakNoRoute` |
+| a route that already contains this node | `X-Lab-Path` | `422 path_loop`, refused before the body and before the border | `TestRouteContainingThisNodeIsRefused` |
+| an anonymous caller naming a node | `X-Lab-Path` from a non-peer | discarded; the path starts fresh at this node | `TestUntrustedPathIsDiscarded` |
+| a client behind an nginx/LB naming a node | `X-Lab-Path` from the terminator | discarded — the terminator relays arbitrary clients, so its path proves nothing | `TestPathIsNotBelievedThroughATerminator` |
+| a peer range that overlaps the terminator | `check-config` | refused at startup | `TestCheckDeployableRefusesAPeerInsideTheTerminator` |
+| rewriting the path or the policy in transit | both are inside the HMAC | the border's signature check fails | `harness/border_adapter_test.py` |
+| two nodes running different declarations | `GET /policy` | same declaration → same isotope; a difference is visible from outside either node | `TestTheSameDeclarationDerivesTheSameIsotope`, `TestADifferentDeclarationDerivesADifferentIsotope` |
+
+### Grace and the span: two bounds, not one
+
+A captured envelope is **replayable on purpose**. "Follow the cluster rules and
+the path holds" is the stability promise: a negotiated route may be reused, and a
+defence that refused reuse would break the thing it protects. So there are two
+bounds, and they answer different questions.
+
+| bound | scope | default | what it answers |
+| --- | --- | --- | --- |
+| **link window** (`--skew-ms`) | one hop | 5 s (the grace tick) | is this envelope too old for *this link*? |
+| **route span** (`route_span_ms`) | the whole path | 15 s (three grace ticks) | has this route chained more grace than a path may spend? |
+| **peer window** (`peer_window_ms`) | one edge link | 100 ms | do two adjacent edges agree on "now"? |
+
+The link window is wide for cluster nodes because the grace tick is wide: a node
+may present the previous tick's path. The span is what stops grace from chaining
+forever — a route that outlives it **dissolves** (`422 route_dissolved`) rather
+than being extended by another hop.
+
+Measured across the LAN on 2026-11-27 (front on jack, border on dmz, span 15 s):
+a route started 1 s ago, 14 s ago, and just now all pass; a route started 20 s
+ago dissolves. Replay inside the span is accepted — that is the promise — and the
+age is carried in the signature (`X-Lab-Route-Start`), so a hop cannot backdate a
+route to keep it alive.
+
+The 5 s tick is a *scheduling* window, not a ceiling on precision. The mechanism
+supports far tighter links — 40/40 forwards passed at a **1 ms** window between
+the two hosts — which is what an edge link should use when its path is short.
+Cluster links stay wide:
+
+| link | window |
+| --- | --- |
+| same host | ~1 ms (measured) |
+| LAN edge | 25–100 ms (measured to 1 ms) |
+| cluster node | 5 s (the grace tick) |
+| route span | 15 s, then dissolution |
+
+### The peer window is a jitter discriminator, not a tamper detector
+
+The tight window between edges is the frequency discriminator: a hop carries the
+instant it appended itself, and the next edge judges that stamp against its own
+clock. That is what settles a wobble in one round trip instead of waiting for the
+path to age out.
+
+It is a **jitter** bound, and it has a measured false-positive curve. On dmz,
+2,000 forwards per cell, a stamped peer hop on every request:
+
+| peer window | c=8 dissolved | c=32 dissolved |
+| --- | --- | --- |
+| 1 ms | 1,685 (84%) | 1,880 (94%) |
+| 5 ms | 64 (3.2%) | 1,168 (58%) |
+| 25 ms | 0 | 33 (1.65%) |
+| 100 ms | 0 | 0 |
+
+The window must exceed **one-way delay + clock skew + the edge's queueing tail**,
+not just the RTT: at c=32 this board's p99 is ~49 ms, so 25 ms holds at c=8 and
+starts dissolving at c=32, while 100 ms holds at both. That is why the concurrency
+cap and the shape budgets matter here too — bounding the queue bounds the jitter
+tail, and a bounded tail is what lets the window be tight. Tight window, bounded
+queue: wobble found fast. Wide window, unbounded queue: wobble hidden in the noise.
+
+### Why a wobbling node destroys the path
+
+The route's start travels inside the signature and is preserved by every hop, so
+every hop ages the route by the same clock. A node whose clock wobbles either
+presents a start in the future (refused) or one that has already outlived the
+span (dissolved) — and because the start is shared, one bad node invalidates the
+route for every hop downstream of it. That is the failure mode the span exists to
+expose: not a hostile replay, but an honest path that quietly stopped being
+current.
 
 ### Measured, not asserted
 
@@ -94,10 +174,31 @@ discovers.
    (`Scenario: a known name resolves to an agreed border address and
    namespace`), so the token is a topology-read capability, not just admission.
    Treat a leaked token as a leaked map.
-3. **No rate limit.** An attacker can spend unlimited requests. With a 32-byte
-   random token the guessing cost is prohibitive, so the residual is
-   **availability**, not admission. Terminate at an edge that rate-limits, or
-   accept the DoS surface.
+3. **No rate limit and no connection bound.** Admission is not the residual —
+   a 32-byte token makes guessing prohibitive. The residual is **availability**,
+   and the resource that matters is not upstream: a refused caller never reaches
+   the border, so upstream bandwidth cannot bound the refusal path. The two
+   paths consume disjoint resources.
+
+   Measured on loopback (2026-11-26, front and client sharing one machine, so
+   the server's share is smaller than these wall-clock numbers):
+
+   | path | rate |
+   | --- | --- |
+   | refused, keep-alive | ~60,000 req/s |
+   | refused, fresh TLS per request | ~3,556 req/s |
+   | accepted, 1 MiB body | ~1,610 req/s (1.6 GiB/s) |
+   | accepted, 1 KiB body | ~13,820 req/s |
+
+   A refusal is cheap; a *handshake* is ~17x a refusal. So the expensive thing
+   an anonymous caller does is not "be refused", it is "make the front do a
+   handshake" — which is why the first control is a connection bound, not a
+   request-rate bucket. The accepted path is bounded by the border's capacity
+   and by bytes/s, so a request limit there is fairness, not defence.
+
+   The cheap refusal is a property to keep: the 403 reads no body and writes no
+   log line. Adding a synchronous access log before the auth check would make
+   the log the amplifier.
 4. **No per-caller audit log.** `/status` counts decisions by reason, not by
    caller. If you need attribution, log at the edge or in the border.
 5. **The registry is trusted and unauthenticated.** `Register`/`Deregister`
@@ -113,9 +214,61 @@ discovers.
    certificate loaded by `ServeTLS`.
 8. **HTTP/1.1 and HTTP/2 by default.** No cipher allow-list, no HSTS, no OCSP
    stapling. Terminate TLS at an edge if you need that policy surface.
-9. **`addr` is not re-read on reload.** The listener is the deployment; the
+9. **A path is trusted by address, not by signature.** A peer is believed
+   because its TCP address is configured; a terminator is never believed. That
+   is the right split for a load balancer, but it means the *peer* set is a
+   credential-equivalent: anyone who can source traffic from a peer address can
+   write a path. The correct long-term form is a scoped credential per hop
+   (`lab/SPLASH.md` *Transport assumptions*: token exchange, DPoP, mTLS), so the
+   path carries its own proof and the source address stops mattering.
+10. **Peers are trusted by address, not by credential.** A path is believed when
+   the TCP peer is inside a configured CIDR. A spoofed source cannot complete a
+   handshake, so this is stronger than it sounds, but a compromised host inside
+   the range can write a path — and a path is evidence, not authority
+   (`lab/SPLASH.md`: *holding an isotope is not reachability*). If a peer set is
+   configured, give each peer its own credential rather than relying on the
+   network location.
+11. **`/policy` is public.** It publishes a derived digest and two counts, never a
+    route, address or namespace. A digest is a confirmation oracle for a guessed
+    declaration; the declaration is operator-owned and the token is the secret,
+    so the disclosure is bounded — but it is a disclosure.
+12. **The policy isotope detects divergence; it does not resolve it.** A node
+    with a stale declaration reports a stale isotope, which is the point, but
+    the front does not refuse to serve on a mismatch — it has nothing to compare
+    against. The border or a peer does the comparison.
+13. **`addr` is not re-read on reload.** The listener is the deployment; the
    policy is what `SIGHUP` swaps. Changing `addr` in the file has no effect
    until a restart, which is logged.
+
+## Capture mode
+
+`-dump-unexpected` writes refused requests to a file. It is a deliberate
+exposure: the file is attacker-controlled text, so it is JSON-encoded, length
+capped, rate limited, and **never includes `Authorization`, `Cookie`,
+`Set-Cookie` or `X-Api-Key`** (`TestDumpNeverWritesTheToken`). Pointed at an empty
+gateway it records what the internet says to an unconfigured host; pointed at a
+live gateway it records the requests the gateway did not expect.
+
+## Eviction
+
+Refusals are counted per address and, past a threshold in a window, written to a
+line a host filter can read:
+
+```
+2026-11-27T04:20:00Z wan-ingress ban ip=192.0.2.5 reason=untrusted count=20
+```
+
+A fail2ban filter:
+
+```ini
+[Definition]
+failregex = ^.*wan-ingress ban ip=<HOST> reason=[a-z_]+ count=\d+$
+```
+
+`never_ban` is the allowlist. Put the jump host in it — a ban on the machine an
+operator reaches the lab through removes the way to undo the ban. Enforcement is
+deliberately outside the front: a bad threshold must not be able to lock an
+operator out of the fix.
 
 ## Before you put it on a WAN
 

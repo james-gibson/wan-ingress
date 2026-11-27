@@ -9,9 +9,9 @@ config and its agreement file.
 
 | field | value |
 | --- | --- |
-| isotope (origin feature) | `VEy5JA5oqzwueYNPiRpoNBvzPYV_hnxlheiQA5h9tjg` |
-| signature prefix (key `seed-42`) | `6ebfe5f8f5145c7e…` |
-| tokens / parts | 122 / 21 |
+| isotope (origin feature) | `GBcFWtOHS-vATnxi4dpiILyggRECufP3MrlYkVMuGSs` |
+| signature prefix (key `seed-42`) | `7a2f99d42815076c…` |
+| tokens / parts | 149 / 26 |
 
 The origin is [`features/wan-ingress.feature`](features/wan-ingress.feature),
 written and validated before the first line of Go.
@@ -37,7 +37,9 @@ shell-to-gherkin canon validated, and the signature above is reproduced by
 - `GET /resolve?name=<raw>` → agreed route, or `422` with `malformed` / `unknown` / `ambiguous`
 - `POST /forward?name=<raw>` → HMAC-signed border envelope, or a typed refusal
   (`border_unconfigured` included); caller-supplied address headers are ignored
-- `GET /status` → resolved and forwarded counts, and quarantines by reason
+- `GET /status` → resolved, forwarded, `border_seen`, `witness_gap`, and quarantines by reason
+- `GET /policy` → the derived isotope of the agreement file, and its size; never
+  a route, address or namespace
 - `POST /mcp` → JSON-RPC probe surface for smoke-alarm (`initialize`,
   `ingress/status`, `notifications/initialized`)
 
@@ -79,6 +81,118 @@ reported as the cost of the boundary, not as the security finding. A second run
 compares held connections against new ones: holding reuses one ingress↔border
 and one border↔target connection across 60 calls, while the new-connection mode
 opens 61 of each and shows the churn cost.
+
+## In a sub-cluster
+
+A path vector, so a route cannot contain itself (`lab/SPLASH.md` → *The proxy*;
+`lab/SLA.md` §12):
+
+```json
+{ "node": "wan-a", "peers": ["10.0.0.0/24"], "terminator": ["10.0.0.5"] }
+```
+
+Behind an nginx or a cloud load balancer, every client shares the terminator's
+source address. `terminator` names it so its traffic is **not** trusted as a
+peer's: a path from the terminator is a client's header and is discarded. A
+range listed in both is refused at startup, because that is exactly the
+configuration where a client's path would be believed.
+
+- every forward appends this node to `X-Lab-Path`, which is inside the signature;
+- a route whose path already contains this node is `422 path_loop`, refused
+  before the body is read and before the border is contacted;
+- a path is believed only when the TCP peer is in `peers` — otherwise an
+  anonymous caller could name a node and have it refuse on someone else's behalf.
+
+And the declaration is *derived, not stored*: every node reports the isotope of
+the agreement file it is running at `GET /policy`, so two nodes that disagree are
+visible from outside either of them. That is a cheap equality test in place of
+fast gossip — you do not need convergence to be invisible if divergence is
+observable.
+
+## Capacity is granted, not configured
+
+A new ingress serves a small default. Capacity above it is something the
+authority says, in a signed grant:
+
+```sh
+wan-ingress-grant -keygen                      # once, on the authority
+wan-ingress-grant -key <b64> -namespace session-42 \
+  -max-conns 8000 -batch 1024 -ttl 1h -out grant.json
+```
+
+```json
+{ "addr": "0.0.0.0:8443", "grant": "/etc/wan-ingress/grant.json",
+  "grant_key": "<authority public key>" }
+```
+
+A grant may also carry per-body-class budgets, because the measured concurrency
+knee differs by an order of magnitude between a 1 KiB request and a 1 MiB one:
+
+```sh
+wan-ingress-grant -key <b64> -namespace session-42 -max-conns 8000 \
+  -shape small:16384:16 -shape medium:262144:8 -shape bulk:1048576:4
+```
+
+The class is chosen from `Content-Length` before the body is read. A request that
+would exceed its class gets `429` with `Retry-After: 1` and is counted as
+`shape_full` — **refused, not queued**, because queueing a body is the memory the
+budget exists to bound. A grant without `shapes` enforces no class budgets: shape
+is an expectation the authority states.
+
+The front verifies with the **public** key and cannot mint: an HMAC would let a
+front that can check a grant also forge one. The grant covers namespace, batch,
+connection ceiling and expiry, and a renewed grant is applied on `SIGHUP` —
+2 → 5,000 connections on one signal, no restart and no dropped admission. A
+grant that fails to verify degrades the front to 64 connections and says so,
+rather than failing to start.
+
+[`docs/placement.md`](docs/placement.md) has the reasoning: what belongs on the
+data-free host, the cgroup that makes "it restarts" true without taking the host
+down, and why the ticket ring waits for a border-side counter.
+
+## Capture mode: what the internet says to an empty gateway
+
+Deploy the front with no agreements and no token, pointed at a capture file:
+
+```sh
+wan-ingress -addr 0.0.0.0:443 -dump-unexpected /var/log/wan-ingress/scan.jsonl
+```
+
+Every request is refused, and every refusal is written as one JSON line — the
+request line, the source, the status and the headers, with `Authorization` and
+cookies stripped. That is the scan:
+
+```json
+{"at":"2026-11-27T05:38:44Z","remote":"198.51.100.7:53773","method":"GET",
+ "host":"example.org","path":"/.env","status":404,
+ "headers":{"User-Agent":"Censys/1.0","Accept":"*/*"}}
+```
+
+An observation gateway is a named exception in the preflight: a tokenless public
+bind is refused unless **both** `allow_empty` and a capture file are set, so an
+operator who forgets a token on a serving gateway is still stopped. It also needs
+`allow_plaintext_wan`, because it terminates nothing — it observes.
+
+```json
+{ "addr": "0.0.0.0:8443", "max_conns": 512,
+  "allow_empty": true, "allow_plaintext_wan": true,
+  "dump_unexpected": "/data/scan.jsonl", "dump_rate": 20 }
+```
+
+Run it in a container so the observation cannot touch the host:
+
+```sh
+docker run -d --name wan-ingress-obs --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory 256m --pids-limit 128 --cpus 1.0 --restart unless-stopped \
+  -p <dmz-address>:80:8443 -v /opt/wan-ingress/data:/data:rw wan-ingress:obs
+```
+
+The capture is bounded on purpose: 4 KiB per line, 50 lines/s by default
+(`-dump-rate`), attacker-controlled strings length-capped and JSON-escaped, and
+**the body is never read** — the request line and headers are the scan, and
+reading bodies would put the capture in the memory path the front exists to
+avoid. Bodies are the next step if the headers prove insufficient, not a default.
 
 ## Self-healing
 

@@ -4,5 +4,9 @@
   "token": "REPLACE_WITH_RANDOM_32_BYTE_TOKEN",
   "border_key": "REPLACE_WITH_RANDOM_32_BYTE_TOKEN",
   "smoke_alarm": "http://smoke-alarm:19100",
-  "allow_plaintext_wan": true
+  "allow_plaintext_wan": true,
+  "ban_log": "/var/log/wan-ingress/bans.log",
+  "never_ban": [
+    "192.168.1.30"
+  ]
 }

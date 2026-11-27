@@ -5,5 +5,9 @@
   "border_key": "REPLACE_WITH_AT_LEAST_32_BYTES",
   "smoke_alarm": "http://127.0.0.1:19100",
   "tls_cert": "",
-  "tls_key": ""
+  "tls_key": "",
+  "ban_log": "",
+  "never_ban": [
+    "192.168.1.30"
+  ]
 }

@@ -34,6 +34,9 @@ func (c *headerCapture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.paths = append(c.paths, r.URL.Path)
 	c.methods = append(c.methods, r.Method)
 	c.mu.Unlock()
+	if canary := r.Header.Get("X-Lab-Canary"); canary != "" {
+		w.Header().Set("X-Lab-Canary", canary)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -279,12 +282,17 @@ func TestCallerHeadersCannotReachTheBorder(t *testing.T) {
 	if auth := got.Get("Authorization"); auth != "" {
 		t.Fatalf("caller credential reached the border: %q", auth)
 	}
-	stamped, err := strconv.ParseInt(got.Get("X-Lab-Timestamp"), 10, 64)
+	// The envelope carries milliseconds, so a window tighter than a second is
+	// expressible. A seconds-resolution stamp could not support one.
+	stampedMS, err := strconv.ParseInt(got.Get("X-Lab-Timestamp"), 10, 64)
 	if err != nil {
 		t.Fatalf("border timestamp = %q: %v", got.Get("X-Lab-Timestamp"), err)
 	}
-	if age := time.Since(time.Unix(stamped, 0)); age > time.Minute || age < -time.Minute {
+	if age := time.Since(time.UnixMilli(stampedMS)); age > time.Minute || age < -time.Minute {
 		t.Fatalf("border timestamp is %s from now; the freshness window would refuse it", age)
+	}
+	if len(got.Get("X-Lab-Timestamp")) < 13 {
+		t.Fatalf("timestamp %q looks like seconds, not milliseconds", got.Get("X-Lab-Timestamp"))
 	}
 }
 

@@ -14,12 +14,16 @@ import time
 import unittest
 import urllib.parse
 
-from border_adapter import SKEW_SECONDS, verify
+from border_adapter import ROUTE_SPAN_MS, SKEW_MS, verify
 
 KEY = b"border-key"
-PATH = "/cluster/namespace/session-42/name/42"
+PATH_BASE = "/cluster/namespace/session-42/name/42"
 NAMESPACE = "session-42"
 BODY = b'{"jsonrpc":"2.0","id":1,"method":"adhd.status"}'
+POLICY = "cG9saWN5LWlzb3RvcGU"
+ROUTE_PATH = "wan-a"
+CANARY = "deadbeef"
+ROUTE_START = int(time.time() * 1000)
 
 
 class Headers(dict):
@@ -27,39 +31,84 @@ class Headers(dict):
         return super().get(name, default)
 
 
-def envelope(stamp: int) -> Headers:
+def envelope(stamp_ms: int) -> Headers:
     digest = hashlib.sha256(BODY).hexdigest()
-    escaped = urllib.parse.quote(PATH, safe="/")
+    escaped = urllib.parse.quote(PATH_BASE, safe="/")
     signature = hmac.new(
         KEY,
-        ("POST\n%s\n%s\n%s\n%s" % (escaped, NAMESPACE, digest, stamp)).encode(),
+        ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%d" % (
+            escaped, NAMESPACE, POLICY, ROUTE_PATH, CANARY, digest, stamp_ms, ROUTE_START)).encode(),
         hashlib.sha256,
     ).hexdigest()
-    return Headers({"X-Lab-Signature": signature, "X-Lab-Timestamp": str(stamp)})
+    return Headers({
+        "X-Lab-Signature": signature,
+        "X-Lab-Timestamp": str(stamp_ms),
+        "X-Lab-Policy": POLICY,
+        "X-Lab-Path": ROUTE_PATH,
+        "X-Lab-Canary": CANARY,
+        "X-Lab-Route-Start": str(ROUTE_START),
+    })
 
 
 class BorderVerifyTest(unittest.TestCase):
     def test_fresh_envelope_verifies(self):
-        self.assertTrue(verify(KEY, PATH, NAMESPACE, BODY, envelope(int(time.time()))))
+        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time() * 1000))))
 
     def test_replayed_envelope_is_refused_after_the_window(self):
-        captured = envelope(int(time.time()) - SKEW_SECONDS - 1)
+        captured = envelope(int(time.time() * 1000) - SKEW_MS - 1)
         # Same signature, same body, same path — only the clock moved.
-        self.assertFalse(verify(KEY, PATH, NAMESPACE, BODY, captured))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, captured))
 
     def test_future_envelope_is_refused(self):
-        self.assertFalse(verify(KEY, PATH, NAMESPACE, BODY, envelope(int(time.time()) + SKEW_SECONDS + 1)))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time() * 1000) + SKEW_MS + 1)))
+
+    def test_a_tighter_window_still_verifies_a_fresh_envelope(self):
+        # The 5 s tick is a cluster skew tolerance; the envelope itself supports
+        # a much tighter claim.
+        for window in (100, 25):
+            self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY,
+                                   envelope(int(time.time() * 1000)), window))
+
+    def test_a_tighter_window_refuses_a_stale_envelope(self):
+        stale = envelope(int(time.time() * 1000) - 30)
+        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, stale, 100))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, stale, 25))
 
     def test_non_numeric_timestamp_is_refused(self):
-        headers = envelope(int(time.time()))
+        headers = envelope(int(time.time() * 1000))
         headers["X-Lab-Timestamp"] = "not-a-number"
-        self.assertFalse(verify(KEY, PATH, NAMESPACE, BODY, headers))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
     def test_tampered_body_is_refused(self):
-        self.assertFalse(verify(KEY, PATH, NAMESPACE, BODY + b" ", envelope(int(time.time()))))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY + b" ", envelope(int(time.time() * 1000))))
 
     def test_wrong_namespace_is_refused(self):
-        self.assertFalse(verify(KEY, PATH, "session-attacker", BODY, envelope(int(time.time()))))
+        self.assertFalse(verify(KEY, PATH_BASE, "session-attacker", BODY, envelope(int(time.time() * 1000))))
+
+    def test_a_different_policy_is_refused(self):
+        headers = envelope(int(time.time() * 1000))
+        headers["X-Lab-Policy"] = "b3RoZXItcG9saWN5"
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
+
+    def test_a_route_inside_its_span_is_accepted(self):
+        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time() * 1000))))
+
+    def test_a_route_past_its_span_dissolves(self):
+        headers = envelope(int(time.time() * 1000))
+        headers["X-Lab-Route-Start"] = str(int(time.time() * 1000) - ROUTE_SPAN_MS - 10)
+        # The signature covers the start, so this is also a signature failure —
+        # which is the point: a hop cannot backdate a route to stay alive.
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
+
+    def test_a_rewritten_canary_is_refused(self):
+        headers = envelope(int(time.time() * 1000))
+        headers["X-Lab-Canary"] = "other"
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
+
+    def test_a_rewritten_path_is_refused(self):
+        headers = envelope(int(time.time() * 1000))
+        headers["X-Lab-Path"] = "wan-a,wan-b"
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
 
 if __name__ == "__main__":

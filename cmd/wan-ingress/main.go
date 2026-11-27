@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -27,6 +28,9 @@ import (
 
 const registryName = "wan-ingress"
 
+// buildVersion is set by the release build; a development build says dev.
+var buildVersion = "dev"
+
 // Flag values are package-level so applyFlags can tell an explicit override
 // from a default: a config file must not be overwritten by an unset flag.
 var (
@@ -38,13 +42,32 @@ var (
 	tlsCert    = flag.String("tls-cert", "", "PEM certificate for TLS termination")
 	tlsKey     = flag.String("tls-key", "", "PEM private key for TLS termination")
 	plaintext  = flag.Bool("allow-plaintext-wan", false, "bind publicly without TLS; TLS must be terminated in front")
+	node       = flag.String("node", "", "this ingress's name in a route path (required in a sub-cluster)")
+	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs of ingress peers whose route path is believed")
+	terminator = flag.String("terminator", "", "comma-separated IPs/CIDRs of the TLS terminator/LB in front")
+	maxConns   = flag.Int("max-conns", 0, "hard cap on accepted connections (0 = unbounded)")
+	banLog     = flag.String("ban-log", "", "file of ban lines for a host filter (fail2ban); empty disables")
+	neverBan   = flag.String("never-ban", "", "comma-separated IPs/CIDRs that can never be banned (the jump host)")
+	routeSpan  = flag.Int("route-span-ms", 0, "how long a negotiated path stays usable (default 15000)")
+	peerWindow = flag.Int("peer-window-ms", 0, "how far adjacent edges' clocks may disagree (default 100)")
+	dumpPath   = flag.String("dump-unexpected", "", "capture refused requests to this file (an empty gateway records a scan)")
+	allowEmpty = flag.Bool("allow-empty", false, "permit a tokenless public bind when a capture file is set")
+	dumpRate   = flag.Int("dump-rate", 0, "captured lines per second (default 50)")
+	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
+	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
 )
 
 func main() {
 	configPath := flag.String("config", "", "path to the JSON config (flags override its fields)")
 	heartbeat := flag.Duration("heartbeat", ingress.HeartbeatInterval, "registry renewal interval")
 	checkConfig := flag.Bool("check-config", false, "validate the config and exit without listening")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("wan-ingress %s\n", buildVersion)
+		return
+	}
 
 	cfg, err := resolveConfig(*configPath)
 	if err != nil {
@@ -54,8 +77,18 @@ func main() {
 	if checkErr := ingress.CheckDeployable(cfg); checkErr != nil {
 		log.Fatalf("refusing to start: %v", checkErr)
 	}
+	// Resolve capacity before the config check so -check-config validates the
+	// grant as well; an operator running the preflight wants to know that a
+	// grant will be honored before a supervisor is installed around it.
+	conns, held, err := capacity(cfg)
+	if err != nil {
+		log.Fatalf("grant: %v", err)
+	}
+	if conns == 0 {
+		log.Printf("warning: no connection cap (no max_conns and no grant); the count is bounded only by the host (docs/placement.md)")
+	}
 	if *checkConfig {
-		log.Printf("config ok: addr=%s tls=%t agreements=%q", cfg.Addr, cfg.TLSCert != "", cfg.Agreements)
+		log.Printf("config ok: addr=%s tls=%t agreements=%q max_conns=%d grant=%t", cfg.Addr, cfg.TLSCert != "", cfg.Agreements, conns, held != nil)
 		return
 	}
 	log.Printf("config loaded: agreements=%q ready=%t", cfg.Agreements, cfg.Token != "" && cfg.BorderKey != "")
@@ -65,13 +98,39 @@ func main() {
 	if err != nil {
 		log.Fatalf("load policy: %v", err)
 	}
+	if cfg.DumpUnexpected != "" && cfg.DumpRate <= 0 {
+		cfg.DumpRate = 50
+	}
+	dumper, err := ingress.NewDumper(cfg.DumpUnexpected, cfg.DumpRate)
+	if err != nil {
+		log.Fatalf("dump: %v", err)
+	}
+	defer func() { _ = dumper.Close() }()
+	if dumper != nil {
+		log.Printf("capture: refused requests -> %s (max %d/s)", cfg.DumpUnexpected, cfg.DumpRate)
+	}
+	server.Dump = dumper
+	server.Shapes = ingress.NewShapeSet(shapesOf(held))
+	logShapes("boot", server.Shapes)
+	bans, err := banLogFor(cfg)
+	if err != nil {
+		log.Fatalf("ban log: %v", err) //nolint:gocritic // exiting; the capture flush is best-effort
+	}
+	server.Bans = bans
+	defer func() { _ = bans.Close() }()
 	runtime := &ingress.Runtime{}
 	runtime.Swap(server)
 
 	listener, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
-		log.Fatalf("listen %s: %v", cfg.Addr, err)
+		log.Fatalf("listen %s: %v", cfg.Addr, err) //nolint:gocritic // exiting; the ban log flush is best-effort
 	}
+	// The cap is applied to the listener, not the handler: unbounded connections
+	// cost memory before a request is ever parsed. The limiter is kept so a
+	// renewed grant can change capacity live.
+	limiter := ingress.NewLimitListener(listener, conns)
+	listener = limiter
+	log.Printf("capacity: %d connections (grant=%t) route_span=%dms", conns, held != nil, cfg.RouteSpanMS)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -119,10 +178,31 @@ func main() {
 				log.Printf("reload rejected, keeping last good config: %v", checkErr)
 				continue
 			}
+			// A renewed grant is a live statement: apply it without a restart.
+			conns, nextGrant, gErr := capacity(next)
+			if gErr != nil {
+				log.Printf("grant rejected, keeping the last good capacity: %v", gErr)
+			} else {
+				limiter.SetLimit(conns)
+				log.Printf("capacity: %d connections (grant=%t)", conns, nextGrant != nil)
+			}
 			srv, err := ingress.NewServer(next, observer)
 			if err != nil {
 				log.Printf("reload rejected, keeping last good policy: %v", err)
 				continue
+			}
+			// The capture file belongs to the process, not the policy: a reload
+			// reuses it unless the path itself changed.
+			if next.DumpUnexpected == cfg.DumpUnexpected {
+				srv.Dump = dumper
+			}
+			srv.Shapes = ingress.NewShapeSet(shapesOf(nextGrant))
+			logShapes("reload", srv.Shapes)
+			if nextBan, bErr := banLogFor(next); bErr != nil {
+				log.Printf("ban log rejected, keeping the last good one: %v", bErr)
+				srv.Bans = bans
+			} else {
+				srv.Bans = nextBan
 			}
 			runtime.Swap(srv)
 			log.Printf("reloaded config: agreements=%q ready=%t", next.Agreements, next.Token != "" && next.BorderKey != "")
@@ -145,7 +225,7 @@ func main() {
 
 	// A config reload may not rebind: the listener is the deployment, the
 	// policy is the swap. Say so instead of silently ignoring a changed addr.
-	log.Printf("wan-ingress listening on %s tls=%t plaintext_wan=%t", listener.Addr(), cfg.TLSCert != "", cfg.AllowPlaintextWAN)
+	log.Printf("wan-ingress listening on %s tls=%t plaintext_wan=%t max_conns=%d", listener.Addr(), cfg.TLSCert != "", cfg.AllowPlaintextWAN, cfg.MaxConns)
 	var serveErr error
 	if cfg.TLSCert != "" {
 		serveErr = httpServer.ServeTLS(listener, cfg.TLSCert, cfg.TLSKey)
@@ -188,8 +268,121 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.TLSKey = *tlsKey
 		case "allow-plaintext-wan":
 			cfg.AllowPlaintextWAN = *plaintext
+		case "node":
+			cfg.Node = *node
+		case "peers":
+			cfg.Peers = splitList(*peers)
+		case "terminator":
+			cfg.Terminator = splitList(*terminator)
+		case "max-conns":
+			cfg.MaxConns = *maxConns
+		case "grant":
+			cfg.Grant = *grant
+		case "grant-key":
+			cfg.GrantKey = *grantKey
+		case "ban-log":
+			cfg.BanLog = *banLog
+		case "never-ban":
+			cfg.NeverBan = splitList(*neverBan)
+		case "route-span-ms":
+			cfg.RouteSpanMS = *routeSpan
+		case "peer-window-ms":
+			cfg.PeerWindowMS = *peerWindow
+		case "allow-empty":
+			cfg.AllowEmpty = *allowEmpty
+		case "dump-unexpected":
+			cfg.DumpUnexpected = *dumpPath
+		case "dump-rate":
+			cfg.DumpRate = *dumpRate
 		}
 	})
+}
+
+// banLogFor opens the ban log from config. Enforcement happens on the host; the
+// front only names the address and the reason.
+func banLogFor(cfg ingress.Config) (*ingress.BanLog, error) {
+	never, err := ingress.ParsePeers(cfg.NeverBan)
+	if err != nil {
+		return nil, err
+	}
+	bans := ingress.NewBanLog(cfg.BanLog, never)
+	if bans == nil {
+		return nil, nil
+	}
+	if err := bans.Err(); err != nil {
+		return nil, err
+	}
+	log.Printf("ban log: %s (never_ban=%d ranges)", cfg.BanLog, len(never))
+	return bans, nil
+}
+
+// shapesOf lists the classes a grant carries. A missing grant has no shapes,
+// which means no per-class budget: shape enforcement is something the authority
+// grants, not something the front assumes.
+func shapesOf(g *ingress.Grant) []ingress.ShapeLimit {
+	if g == nil {
+		return nil
+	}
+	return g.Shapes
+}
+
+func logShapes(when string, set *ingress.ShapeSet) {
+	limits := set.Limits()
+	if len(limits) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(limits))
+	for _, l := range limits {
+		parts = append(parts, fmt.Sprintf("%s<=%dB:%d", l.Class, l.MaxBytes, l.MaxConns))
+	}
+	log.Printf("%s shapes: %s", when, strings.Join(parts, " "))
+}
+
+// fallbackConns is what an ingress gets when it has no valid grant. It is
+// deliberately small: a front that cannot prove its standing should serve like
+// a new one until the authority renews it, and say so in the log.
+const fallbackConns = 64
+
+// capacity resolves the connection ceiling: the smaller of the operator's local
+// cap and whatever a verified grant allows. A missing grant is not an error; a
+// grant that does not verify degrades to fallbackConns (bounded by the local
+// cap) and reports why, because a front is supposed to keep restarting and
+// serving, not fail closed on a stale file.
+func capacity(cfg ingress.Config) (int, *ingress.Grant, error) {
+	if cfg.Grant == "" {
+		return cfg.MaxConns, nil, nil
+	}
+	if cfg.GrantKey == "" {
+		return 0, nil, fmt.Errorf("a grant is configured without grant_key")
+	}
+	pub, err := ingress.ParseGrantKey(cfg.GrantKey)
+	if err != nil {
+		return 0, nil, err
+	}
+	held, err := ingress.LoadGrant(cfg.Grant, pub, time.Now())
+	if err != nil {
+		fallback := fallbackConns
+		if cfg.MaxConns > 0 && cfg.MaxConns < fallback {
+			fallback = cfg.MaxConns
+		}
+		log.Printf("grant not usable (%v); serving at %d connections until renewed", err, fallback)
+		return fallback, nil, nil
+	}
+	log.Printf("grant ok: issuer=%s namespace=%s batch=%d max_conns=%d expires=%s",
+		held.Issuer, held.Namespace, held.Batch, held.MaxConns,
+		time.Unix(held.Expires, 0).UTC().Format(time.RFC3339))
+	return ingress.EffectiveConns(cfg.MaxConns, &held), &held, nil
+}
+
+// splitList reads a comma-separated flag into a slice, treating empty as none.
+func splitList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // endpointURL turns a listener address into the URL a dependent dials. A

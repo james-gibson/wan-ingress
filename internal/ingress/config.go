@@ -20,6 +20,61 @@ type Config struct {
 	BorderKey  string `json:"border_key,omitempty"`
 	SmokeAlarm string `json:"smoke_alarm,omitempty"`
 
+	// Node is this instance's name in a route path. Empty means the path is not
+	// extended, which is the single-instance case. In a sub-cluster every
+	// instance needs its own value, or the loop check refuses its peers.
+	Node string `json:"node,omitempty"`
+
+	// Peers are ingress instances reached directly, whose route path is
+	// believed. A path from any other source is ignored, so an anonymous
+	// caller cannot name a node and have it refuse a request it never saw.
+	Peers []string `json:"peers,omitempty"`
+
+	// MaxConns is the local hard cap on accepted connections. Excess callers
+	// wait in the kernel accept queue, so the front's footprint is a function of
+	// this number rather than of how fast sockets arrive. A grant may lower the
+	// admitted figure; it never raises this one.
+	MaxConns int `json:"max_conns,omitempty"`
+
+	// Grant is a path to the authority's signed statement of capacity, and
+	// GrantKey the authority's Ed25519 public key. The front verifies; it cannot
+	// mint. Grant is the lever that lets a well-behaved ingress go faster than
+	// the local default without an operator editing config.
+	Grant    string `json:"grant,omitempty"`
+	GrantKey string `json:"grant_key,omitempty"`
+
+	// RouteSpanMS bounds how long a negotiated path stays usable. Replay within
+	// the span is the stability promise, not a threat: the bound is age. Default
+	// is three grace ticks (15s); a link may spend it at any baud.
+	RouteSpanMS int `json:"route_span_ms,omitempty"`
+
+	// PeerWindowMS is how far two adjacent edges' clocks may disagree. Tighter
+	// than the route span: the span accepts a path's age, this judges one link.
+	PeerWindowMS int `json:"peer_window_ms,omitempty"`
+
+	// AllowEmpty permits a public bind with no token, but only together with a
+	// capture file: the posture it exists for is an empty gateway whose whole
+	// job is to refuse and record. It is not a general bypass — without a dump
+	// path the preflight still refuses.
+	AllowEmpty bool `json:"allow_empty,omitempty"`
+
+	// DumpUnexpected is a capture file for refused requests: point it at an empty
+	// gateway and it records what the internet says to an unconfigured host.
+	DumpUnexpected string `json:"dump_unexpected,omitempty"`
+	DumpRate       int    `json:"dump_rate,omitempty"`
+
+	// BanLog is a file of ban lines a host-side filter (fail2ban) can read, and
+	// NeverBan is the allowlist. Enforcement stays outside the front so a bad
+	// threshold cannot lock an operator out of the fix.
+	BanLog   string   `json:"ban_log,omitempty"`
+	NeverBan []string `json:"never_ban,omitempty"`
+
+	// Terminator is the TLS terminator or load balancer in front of this
+	// instance (nginx, a cloud LB). It relays arbitrary clients, so a path
+	// arriving from it is a *client's* header, not a peer's: it is ignored even
+	// when the address is also listed in peers.
+	Terminator []string `json:"terminator,omitempty"`
+
 	// TLSCert and TLSCertKey terminate TLS in this process. A public bind
 	// without them is refused unless AllowPlaintextWAN is set, and that flag
 	// means "TLS is terminated in front of me", not "TLS does not matter".
@@ -68,11 +123,24 @@ func NewServer(cfg Config, observer *Observer) (*Server, error) {
 	if observer == nil {
 		observer = NewObserver()
 	}
+	peers, err := ParsePeers(cfg.Peers)
+	if err != nil {
+		return nil, err
+	}
+	terminators, err := ParsePeers(cfg.Terminator)
+	if err != nil {
+		return nil, err
+	}
 	srv := &Server{
-		Resolver:  resolver,
-		Forwarder: &Forwarder{BorderKey: []byte(cfg.BorderKey)},
-		Token:     cfg.Token,
-		Observer:  observer,
+		Resolver:     resolver,
+		Forwarder:    &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
+		Token:        cfg.Token,
+		Observer:     observer,
+		Node:         cfg.Node,
+		RouteSpanMS:  cfg.RouteSpanMS,
+		PeerWindowMS: cfg.PeerWindowMS,
+		Peers:        peers,
+		Terminator:   terminators,
 	}
 	srv.Handler() // build the mux once, at swap time
 	return srv, nil

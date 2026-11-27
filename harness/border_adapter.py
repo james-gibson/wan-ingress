@@ -24,28 +24,55 @@ import time
 import urllib.parse
 
 # A signed envelope is fresh for this long. Without the window the signature
-# proves intent forever: a captured call replays cleanly, because every field
-# it covers is unchanged. The forwarder stamps the time; the border is the only
+# proves intent forever: a captured call replays cleanly, because every field it
+# covers is unchanged. The forwarder stamps milliseconds; the border is the only
 # place that can refuse a stale one, so the check lives here.
-SKEW_SECONDS = 60
+#
+# The lab's 5 s tick is a clock-skew tolerance for the cluster, not the finest
+# granularity the envelope can support. The window must exceed
+#     one-way delay + clock skew + jitter
+# so it is set per deployment. 1000 ms is the default; the suite proves 100 ms
+# and 25 ms between two hosts on the same LAN.
+SKEW_MS = 5000
+
+# A route may be replayed inside its span: that is the stability promise, not a
+# vulnerability. What bounds it is age. Three grace ticks is the default.
+ROUTE_SPAN_MS = 15000
 
 
-def verify(key: bytes, path: str, namespace: str, body: bytes, headers) -> bool:
+def verify(key: bytes, path: str, namespace: str, body: bytes, headers,
+           skew_ms: int = SKEW_MS, span_ms: int = ROUTE_SPAN_MS) -> bool:
     signature = headers.get("X-Lab-Signature", "")
     timestamp = headers.get("X-Lab-Timestamp", "")
     if not signature or not timestamp:
         return False
     try:
-        stamped = int(timestamp)
+        stamped_ms = int(timestamp)
     except ValueError:
         return False
-    if abs(time.time() - stamped) > SKEW_SECONDS:
+    if abs(time.time() * 1000 - stamped_ms) > skew_ms:
         return False
+    route_start = headers.get("X-Lab-Route-Start", "")
+    # Grace, then dissolution: the route may be replayed within its span.
+    if route_start:
+        try:
+            start_ms = int(route_start)
+        except ValueError:
+            return False
+        if start_ms > time.time() * 1000:
+            return False
+        if time.time() * 1000 - start_ms > span_ms:
+            return False
     digest = hashlib.sha256(body).hexdigest()
     escaped = urllib.parse.quote(path, safe="/")
+    policy = headers.get("X-Lab-Policy", "")
+    route_path = headers.get("X-Lab-Path", "")
+    canary = headers.get("X-Lab-Canary", "")
+    route_start = headers.get("X-Lab-Route-Start", "")
     expected = hmac.new(
         key,
-        ("POST\n%s\n%s\n%s\n%s" % (escaped, namespace, digest, timestamp)).encode(),
+        ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s" % (
+            escaped, namespace, policy, route_path, canary, digest, timestamp, route_start)).encode(),
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(signature, expected)
@@ -124,7 +151,8 @@ class BorderState:
                 self._conn = None
 
 
-def make_handler(key: bytes, state: BorderState):
+def make_handler(key: bytes, state: BorderState, skew_ms: int = SKEW_MS,
+                 span_ms: int = ROUTE_SPAN_MS):
     class Border(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -153,13 +181,21 @@ def make_handler(key: bytes, state: BorderState):
             length = int(self.headers.get("Content-Length", "0") or 0)
             body = self.rfile.read(length)
             namespace = self.headers.get("X-Lab-Namespace", "")
-            if not verify(key, self.path, namespace, body, self.headers):
+            if not verify(key, self.path, namespace, body, self.headers, skew_ms, span_ms):
                 self._json(403, {"error": "bad border signature"})
                 return
             status, payload = state.forward(body)
+            with state.lock:
+                seen = state.requests
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
+            # Forced inclusion: the border carries the marker forward and reports
+            # its own count, so the front is not the only witness.
+            canary = self.headers.get("X-Lab-Canary", "")
+            if canary:
+                self.send_header("X-Lab-Canary", canary)
+            self.send_header("X-Lab-Seen", str(seen))
             if state.mode == "new":
                 self.send_header("Connection", "close")
             self.end_headers()
@@ -177,12 +213,19 @@ def main() -> int:
     ap.add_argument("--key", required=True)
     ap.add_argument("--target", required=True, help="target adhd /mcp endpoint")
     ap.add_argument("--connection-mode", choices=("hold", "new"), default="hold")
+    ap.add_argument("--skew-ms", type=int, default=SKEW_MS,
+                    help="link freshness window; must exceed one-way delay + clock skew + jitter")
+    ap.add_argument("--route-span-ms", type=int, default=ROUTE_SPAN_MS,
+                    help="how long a negotiated path stays usable; replay inside it is the promise")
     args = ap.parse_args()
 
     host, port = args.addr.rsplit(":", 1)
     state = BorderState(args.connection_mode, args.target)
-    server = http.server.ThreadingHTTPServer((host, int(port)), make_handler(args.key.encode(), state))
-    print("border %s listening %s -> %s" % (args.connection_mode, server.server_address, args.target), flush=True)
+    server = http.server.ThreadingHTTPServer(
+        (host, int(port)), make_handler(args.key.encode(), state, args.skew_ms, args.route_span_ms))
+    print("border %s listening %s -> %s skew=%dms span=%dms" % (
+        args.connection_mode, server.server_address, args.target,
+        args.skew_ms, args.route_span_ms), flush=True)
     server.serve_forever()
     return 0
 
