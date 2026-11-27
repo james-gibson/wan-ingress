@@ -7,35 +7,72 @@ import (
 
 // LimitListener bounds the number of accepted connections. The excess waits in
 // the kernel's accept queue rather than in this process, which is the point: the
-// front's memory becomes a function of MaxConns, not of how fast a caller can
+// front's memory becomes a function of the limit, not of how fast a caller can
 // open sockets.
 //
-// This is the local hard cap. A signed grant may raise the number of connections
-// an ingress is *allowed* to admit (docs/placement.md), but the grant is clamped
-// to this value, so no amount of standing lets a front exceed the footprint the
-// host can survive.
+// The limit is mutable so a renewed grant can raise or lower it without a
+// restart — "go faster if authorized" is a live statement, not a config edit.
 type LimitListener struct {
 	net.Listener
-	sem chan struct{}
+
+	mu   sync.Mutex
+	cond *sync.Cond
+	cur  int
+	max  int
 }
 
-// NewLimitListener bounds a listener. max <= 0 leaves the listener unbounded.
-func NewLimitListener(l net.Listener, limit int) net.Listener {
-	if limit <= 0 {
-		return l
+// NewLimitListener bounds a listener. limit <= 0 means no local ceiling; a grant
+// may still impose one through SetLimit.
+func NewLimitListener(l net.Listener, limit int) *LimitListener {
+	ll := &LimitListener{Listener: l, max: limit}
+	ll.cond = sync.NewCond(&ll.mu)
+	return ll
+}
+
+// SetLimit changes the ceiling for subsequent accepts. Conns already admitted are
+// not dropped: shrinking the limit stops new accepts until releases bring the
+// count back under it.
+func (l *LimitListener) SetLimit(limit int) {
+	l.mu.Lock()
+	l.max = limit
+	l.mu.Unlock()
+	l.cond.Broadcast()
+}
+
+// Limit reports the current ceiling (0 = unbounded).
+func (l *LimitListener) Limit() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.max
+}
+
+func (l *LimitListener) acquire() {
+	l.mu.Lock()
+	for l.max > 0 && l.cur >= l.max {
+		l.cond.Wait()
 	}
-	return &LimitListener{Listener: l, sem: make(chan struct{}, limit)}
+	l.cur++
+	l.mu.Unlock()
 }
 
-// Accept blocks until a connection slot is free, then accepts.
+func (l *LimitListener) release() {
+	l.mu.Lock()
+	if l.cur > 0 {
+		l.cur--
+	}
+	l.mu.Unlock()
+	l.cond.Broadcast()
+}
+
+// Accept blocks until a slot is free, then accepts.
 func (l *LimitListener) Accept() (net.Conn, error) {
-	l.sem <- struct{}{}
+	l.acquire()
 	c, err := l.Listener.Accept()
 	if err != nil {
-		<-l.sem
+		l.release()
 		return nil, err
 	}
-	return &limitConn{Conn: c, release: func() { <-l.sem }}, nil
+	return &limitConn{Conn: c, release: l.release}, nil
 }
 
 type limitConn struct {

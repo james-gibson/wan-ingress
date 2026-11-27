@@ -61,16 +61,89 @@ func TestLimitListenerHoldsExcessInTheBacklog(t *testing.T) {
 	}
 }
 
-func TestZeroMaxConnsLeavesTheListenerUnbounded(t *testing.T) {
+// A renewed grant changes the ceiling live: raising it admits a connection the
+// previous limit would have held.
+func TestLimitListenerRaisesAndLowersLive(t *testing.T) {
 	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = inner.Close() }()
-	if got := NewLimitListener(inner, 0); got != interface{}(inner) {
-		t.Fatal("0 did not leave the listener unwrapped")
+
+	ln := NewLimitListener(inner, 1)
+	defer func() { _ = ln.Close() }()
+
+	first, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := NewLimitListener(inner, -1); got != interface{}(inner) {
-		t.Fatal("a negative cap did not leave the listener unwrapped")
+	defer func() { _ = first.Close() }()
+	second, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+
+	held, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan net.Conn, 1)
+	go func() {
+		c, acceptErr := ln.Accept()
+		if acceptErr == nil {
+			done <- c
+		}
+	}()
+	select {
+	case <-done:
+		t.Fatal("accepted past the cap")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The authority renews with more room.
+	ln.SetLimit(2)
+	select {
+	case c := <-done:
+		_ = c.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("raising the limit did not admit the waiting connection")
+	}
+
+	// Shrinking again stops new accepts until the count falls back under it.
+	ln.SetLimit(1)
+	_ = held.Close()
+
+	third, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = third.Close() }()
+	admitted := make(chan struct{})
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.Close()
+			close(admitted)
+		}
+	}()
+	select {
+	case <-admitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a legal connection was not admitted after the shrink")
+	}
+}
+
+func TestZeroLimitIsUnbounded(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = inner.Close() }()
+	ln := NewLimitListener(inner, 0)
+	defer func() { _ = ln.Close() }()
+	if ln.Limit() != 0 {
+		t.Fatalf("limit = %d, want 0 (unbounded)", ln.Limit())
 	}
 }

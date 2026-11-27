@@ -9,7 +9,7 @@ rm -f "$out"/wan-ingress-* "$out"/healthcheck-* "$out"/SHA-256SUMS
 
 for os in darwin linux; do
   for arch in amd64 arm64; do
-    for cmd in wan-ingress healthcheck; do
+    for cmd in wan-ingress wan-ingress-grant healthcheck; do
       bin="$out/$cmd-$os-$arch"
       CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
         go build -trimpath -ldflags="-s -w" -o "$bin" "./cmd/$cmd"

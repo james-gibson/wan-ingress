@@ -109,6 +109,33 @@ visible from outside either of them. That is a cheap equality test in place of
 fast gossip — you do not need convergence to be invisible if divergence is
 observable.
 
+## Capacity is granted, not configured
+
+A new ingress serves a small default. Capacity above it is something the
+authority says, in a signed grant:
+
+```sh
+wan-ingress-grant -keygen                      # once, on the authority
+wan-ingress-grant -key <b64> -namespace session-42 \
+  -max-conns 8000 -batch 1024 -ttl 1h -out grant.json
+```
+
+```json
+{ "addr": "0.0.0.0:8443", "grant": "/etc/wan-ingress/grant.json",
+  "grant_key": "<authority public key>" }
+```
+
+The front verifies with the **public** key and cannot mint: an HMAC would let a
+front that can check a grant also forge one. The grant covers namespace, batch,
+connection ceiling and expiry, and a renewed grant is applied on `SIGHUP` —
+2 → 5,000 connections on one signal, no restart and no dropped admission. A
+grant that fails to verify degrades the front to 64 connections and says so,
+rather than failing to start.
+
+[`docs/placement.md`](docs/placement.md) has the reasoning: what belongs on the
+data-free host, the cgroup that makes "it restarts" true without taking the host
+down, and why the ticket ring waits for a border-side counter.
+
 ## Self-healing
 
 - the registry name is renewed on a heartbeat (`-heartbeat`, default 1m, inside

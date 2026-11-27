@@ -8,8 +8,9 @@ as the front and an i7-7700 as the neighbour/authority. They are recorded to
 make the arithmetic checkable, not to be quoted as absolutes.
 
 **Status.** The placement rule and the cgroup are deployment practice and apply
-today. The ticket ring and the earned grant are the design's next step; they are
-marked below so nobody mistakes a target for an implemented feature.
+today. The signed grant is implemented (`internal/ingress/grant.go`,
+`cmd/wan-ingress-grant`) and is enforced live. The ticket ring is specified but
+not implemented, for the reason given in §4.
 
 ---
 
@@ -61,28 +62,42 @@ Neither is a performance knob. They are the wall.
 SPLASH, *Metering*: **the supply is earned** — "a cluster that behaves at scale
 may write more pads… a misbehaving cluster cannot mint."
 
-The soft limits therefore come from the **authority**, as a signed grant, not
+The softer limit therefore comes from the **authority**, as a signed grant, not
 from a local constant:
 
 ```json
 {
+  "version": "wan-ingress-grant-v1",
   "namespace": "session-42",
-  "batch": 1024,          // tickets in this grant
-  "max_conns": 8000,      // concurrency the holder may admit
-  "expires": 1767225600,  // tickets die with the grant
-  "sig": "…"              // HMAC by the signing authority
+  "batch": 1024,            // tickets in this grant
+  "max_conns": 8000,        // connections the holder may admit
+  "expires": 1795755304,    // the grant dies here
+  "issuer": "jack",
+  "signature": "…"          // Ed25519 by the signing authority
 }
 ```
 
-The front admits `min(granted, local_hard_cap, cgroup)`. Three consequences:
+The front admits `min(granted, local_hard_cap, cgroup)`.
+
+**Ed25519 rather than an HMAC.** Verifying an HMAC requires the key, and a holder
+of the key can mint. A front that verifies with a public key can check a grant
+but cannot produce one — so "go faster" is a statement the authority makes, not a
+decision the front takes. The signature covers every field that grants anything:
+namespace, batch, ceiling, expiry and issuer. Editing any of them invalidates it.
+
+Raising capacity does not need a restart: a renewed grant is re-read on `SIGHUP`
+and applied to the listener live (measured: 2 → 5,000 connections on one signal,
+no dropped admission).
+
+Three consequences:
 
 - a well-balanced ingress — good rung, low 42i distance, probes passing —
   is **granted more**: a larger batch, more concurrency, a longer expiry. It goes
   faster because it has demonstrated it can.
-- a new or flapping ingress is granted little. A crash loop is a flapping route;
-  dampening suppresses it rather than banning it, and the penalty decays.
-- the front cannot forge a grant. It holds tickets, not the key, so "go faster"
-  is something the authority says, not something the front decides.
+- a new or flapping ingress is granted little, and a grant that fails to verify
+  degrades the front to 64 connections until it is renewed — logged, not fatal,
+  because a front is supposed to restart and keep serving.
+- the front cannot forge a grant. It holds a public key, not the private one.
 
 The hard ceiling does not move with standing. A proven ingress may use more of
 the host; it may not take the host down, because the host is what holds the data
@@ -97,11 +112,18 @@ and no threshold for an attacker to sit just under.
 A ticket ring is a cache between admissions and the authority. Its size is set by
 two things, neither of which is bytes:
 
-**Concurrency per signer round trip.** At dmz's measured 0.6 ms signer RTT, a
+**Concurrency per round trip.** At dmz's measured 0.6 ms authority round trip, a
 ring of **1** admits at most ~1,600 connections/s and queues everything behind
-it. A grant of 64 absorbs a 64-connection burst with no queue and refills below
+it. A batch of 64 absorbs a 64-connection burst with no queue and refills below
 25%. A ring of 1 is therefore correct only for a low-arrival door, and it is
-honest about what it is: one admission per signer round trip.
+honest about what it is: one admission per authority round trip.
+
+**Why the ring is still specified and not built.** A ticket is only meaningful
+where it is *checked* — at the border — and the batch bound can only be enforced
+where a per-grant counter lives. Deriving tickets from a seed in the grant lets
+the front derive any index it likes, so the batch limit would be decorative. The
+ring therefore waits for the border-side counting decision; until then the grant's
+`max_conns` and `expires` carry the earned-capacity property on their own.
 
 **Theft radius.** A stolen batch is usable until expiry, so exposure is
 `batch × TTL`, not `batch`. Prefer many short-lived tickets over few long-lived
@@ -160,8 +182,9 @@ authority a general signing oracle and puts an RTT in front of every request.
 | fail-closed preflight, TLS, reconnect hygiene | implemented (`security/wan-readiness`) |
 | cgroup / `Restart=always` | deployment practice — the unit files do not set limits yet |
 | `max-conns` | implemented (`-max-conns`, applied at the listener) |
-| ticket ring + earned grant | not implemented |
+| signed grant (Ed25519) + live renew | implemented (`-grant`, `-grant-key`, `cmd/wan-ingress-grant`) |
+| ticket ring | specified, not implemented — needs border-side counting (§4) |
 | splice mode | measured in a harness, not in the binary |
 
 The next code change is inheriting the read/idle timeouts on any raw path (splice
-mode); the grant format above is the design for the step after that.
+mode), then the ticket ring once the border-side counter is decided.

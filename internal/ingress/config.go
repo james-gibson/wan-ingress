@@ -36,6 +36,13 @@ type Config struct {
 	// admitted figure; it never raises this one.
 	MaxConns int `json:"max_conns,omitempty"`
 
+	// Grant is a path to the authority's signed statement of capacity, and
+	// GrantKey the authority's Ed25519 public key. The front verifies; it cannot
+	// mint. Grant is the lever that lets a well-behaved ingress go faster than
+	// the local default without an operator editing config.
+	Grant    string `json:"grant,omitempty"`
+	GrantKey string `json:"grant_key,omitempty"`
+
 	// Terminator is the TLS terminator or load balancer in front of this
 	// instance (nginx, a cloud LB). It relays arbitrary clients, so a path
 	// arriving from it is a *client's* header, not a peer's: it is ignored even

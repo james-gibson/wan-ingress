@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -42,6 +43,8 @@ var (
 	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs of ingress peers whose route path is believed")
 	terminator = flag.String("terminator", "", "comma-separated IPs/CIDRs of the TLS terminator/LB in front")
 	maxConns   = flag.Int("max-conns", 0, "hard cap on accepted connections (0 = unbounded)")
+	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
+	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
 )
 
 func main() {
@@ -58,11 +61,18 @@ func main() {
 	if checkErr := ingress.CheckDeployable(cfg); checkErr != nil {
 		log.Fatalf("refusing to start: %v", checkErr)
 	}
-	if cfg.MaxConns == 0 {
-		log.Printf("warning: max_conns is unset; the connection count is bounded only by the host (docs/placement.md)")
+	// Resolve capacity before the config check so -check-config validates the
+	// grant as well; an operator running the preflight wants to know that a
+	// grant will be honored before a supervisor is installed around it.
+	conns, held, err := capacity(cfg)
+	if err != nil {
+		log.Fatalf("grant: %v", err)
+	}
+	if conns == 0 {
+		log.Printf("warning: no connection cap (no max_conns and no grant); the count is bounded only by the host (docs/placement.md)")
 	}
 	if *checkConfig {
-		log.Printf("config ok: addr=%s tls=%t agreements=%q max_conns=%d", cfg.Addr, cfg.TLSCert != "", cfg.Agreements, cfg.MaxConns)
+		log.Printf("config ok: addr=%s tls=%t agreements=%q max_conns=%d grant=%t", cfg.Addr, cfg.TLSCert != "", cfg.Agreements, conns, held != nil)
 		return
 	}
 	log.Printf("config loaded: agreements=%q ready=%t", cfg.Agreements, cfg.Token != "" && cfg.BorderKey != "")
@@ -80,8 +90,11 @@ func main() {
 		log.Fatalf("listen %s: %v", cfg.Addr, err)
 	}
 	// The cap is applied to the listener, not the handler: unbounded connections
-	// cost memory before a request is ever parsed.
-	listener = ingress.NewLimitListener(listener, cfg.MaxConns)
+	// cost memory before a request is ever parsed. The limiter is kept so a
+	// renewed grant can change capacity live.
+	limiter := ingress.NewLimitListener(listener, conns)
+	listener = limiter
+	log.Printf("capacity: %d connections (grant=%t)", conns, held != nil)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -128,6 +141,13 @@ func main() {
 			if checkErr := ingress.CheckDeployable(next); checkErr != nil {
 				log.Printf("reload rejected, keeping last good config: %v", checkErr)
 				continue
+			}
+			// A renewed grant is a live statement: apply it without a restart.
+			if conns, held, gErr := capacity(next); gErr != nil {
+				log.Printf("grant rejected, keeping the last good capacity: %v", gErr)
+			} else {
+				limiter.SetLimit(conns)
+				log.Printf("capacity: %d connections (grant=%t)", conns, held != nil)
 			}
 			srv, err := ingress.NewServer(next, observer)
 			if err != nil {
@@ -206,8 +226,48 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.Terminator = splitList(*terminator)
 		case "max-conns":
 			cfg.MaxConns = *maxConns
+		case "grant":
+			cfg.Grant = *grant
+		case "grant-key":
+			cfg.GrantKey = *grantKey
 		}
 	})
+}
+
+// fallbackConns is what an ingress gets when it has no valid grant. It is
+// deliberately small: a front that cannot prove its standing should serve like
+// a new one until the authority renews it, and say so in the log.
+const fallbackConns = 64
+
+// capacity resolves the connection ceiling: the smaller of the operator's local
+// cap and whatever a verified grant allows. A missing grant is not an error; a
+// grant that does not verify degrades to fallbackConns (bounded by the local
+// cap) and reports why, because a front is supposed to keep restarting and
+// serving, not fail closed on a stale file.
+func capacity(cfg ingress.Config) (int, *ingress.Grant, error) {
+	if cfg.Grant == "" {
+		return cfg.MaxConns, nil, nil
+	}
+	if cfg.GrantKey == "" {
+		return 0, nil, fmt.Errorf("a grant is configured without grant_key")
+	}
+	pub, err := ingress.ParseGrantKey(cfg.GrantKey)
+	if err != nil {
+		return 0, nil, err
+	}
+	held, err := ingress.LoadGrant(cfg.Grant, pub, time.Now())
+	if err != nil {
+		fallback := fallbackConns
+		if cfg.MaxConns > 0 && cfg.MaxConns < fallback {
+			fallback = cfg.MaxConns
+		}
+		log.Printf("grant not usable (%v); serving at %d connections until renewed", err, fallback)
+		return fallback, nil, nil
+	}
+	log.Printf("grant ok: issuer=%s namespace=%s batch=%d max_conns=%d expires=%s",
+		held.Issuer, held.Namespace, held.Batch, held.MaxConns,
+		time.Unix(held.Expires, 0).UTC().Format(time.RFC3339))
+	return ingress.EffectiveConns(cfg.MaxConns, &held), &held, nil
 }
 
 // splitList reads a comma-separated flag into a slice, treating empty as none.
