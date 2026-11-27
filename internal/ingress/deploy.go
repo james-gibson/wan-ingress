@@ -62,13 +62,18 @@ func CheckDeployable(cfg Config) error {
 	if !public {
 		return nil
 	}
-	if cfg.Token == "" {
-		return fmt.Errorf("refusing to bind %q with no token: a public listener that refuses everything is still a public listener", cfg.Addr)
+	// An observation gateway is a named exception: a public, tokenless, borderless
+	// listener whose whole job is to refuse and record. It needs allow_empty and a
+	// capture file, so the guard still refuses an operator who simply forgot the
+	// token on a serving gateway.
+	capture := cfg.AllowEmpty && cfg.DumpUnexpected != ""
+	if cfg.Token == "" && !capture {
+		return fmt.Errorf("refusing to bind %q with no token: a public listener that refuses everything is still a public listener (for an observation gateway, set allow_empty with dump_unexpected)", cfg.Addr)
 	}
-	if len(cfg.Token) < MinWANSecretBytes {
+	if cfg.Token != "" && len(cfg.Token) < MinWANSecretBytes {
 		return fmt.Errorf("refusing to bind %q: token is %d bytes, need at least %d", cfg.Addr, len(cfg.Token), MinWANSecretBytes)
 	}
-	if len(cfg.BorderKey) < MinWANSecretBytes {
+	if !capture && len(cfg.BorderKey) < MinWANSecretBytes {
 		return fmt.Errorf("refusing to bind %q: border_key is %d bytes, need at least %d", cfg.Addr, len(cfg.BorderKey), MinWANSecretBytes)
 	}
 	if cfg.TLSCert == "" && !cfg.AllowPlaintextWAN {

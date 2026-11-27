@@ -52,6 +52,12 @@ type Config struct {
 	// than the route span: the span accepts a path's age, this judges one link.
 	PeerWindowMS int `json:"peer_window_ms,omitempty"`
 
+	// AllowEmpty permits a public bind with no token, but only together with a
+	// capture file: the posture it exists for is an empty gateway whose whole
+	// job is to refuse and record. It is not a general bypass — without a dump
+	// path the preflight still refuses.
+	AllowEmpty bool `json:"allow_empty,omitempty"`
+
 	// DumpUnexpected is a capture file for refused requests: point it at an empty
 	// gateway and it records what the internet says to an unconfigured host.
 	DumpUnexpected string `json:"dump_unexpected,omitempty"`

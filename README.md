@@ -168,6 +168,26 @@ cookies stripped. That is the scan:
  "headers":{"User-Agent":"Censys/1.0","Accept":"*/*"}}
 ```
 
+An observation gateway is a named exception in the preflight: a tokenless public
+bind is refused unless **both** `allow_empty` and a capture file are set, so an
+operator who forgets a token on a serving gateway is still stopped. It also needs
+`allow_plaintext_wan`, because it terminates nothing — it observes.
+
+```json
+{ "addr": "0.0.0.0:8443", "max_conns": 512,
+  "allow_empty": true, "allow_plaintext_wan": true,
+  "dump_unexpected": "/data/scan.jsonl", "dump_rate": 20 }
+```
+
+Run it in a container so the observation cannot touch the host:
+
+```sh
+docker run -d --name wan-ingress-obs --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory 256m --pids-limit 128 --cpus 1.0 --restart unless-stopped \
+  -p <dmz-address>:80:8443 -v /opt/wan-ingress/data:/data:rw wan-ingress:obs
+```
+
 The capture is bounded on purpose: 4 KiB per line, 50 lines/s by default
 (`-dump-rate`), attacker-controlled strings length-capped and JSON-escaped, and
 **the body is never read** — the request line and headers are the scan, and

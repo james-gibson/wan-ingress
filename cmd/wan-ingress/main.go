@@ -51,6 +51,7 @@ var (
 	routeSpan  = flag.Int("route-span-ms", 0, "how long a negotiated path stays usable (default 15000)")
 	peerWindow = flag.Int("peer-window-ms", 0, "how far adjacent edges' clocks may disagree (default 100)")
 	dumpPath   = flag.String("dump-unexpected", "", "capture refused requests to this file (an empty gateway records a scan)")
+	allowEmpty = flag.Bool("allow-empty", false, "permit a tokenless public bind when a capture file is set")
 	dumpRate   = flag.Int("dump-rate", 0, "captured lines per second (default 50)")
 	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
 	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
@@ -287,6 +288,8 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.RouteSpanMS = *routeSpan
 		case "peer-window-ms":
 			cfg.PeerWindowMS = *peerWindow
+		case "allow-empty":
+			cfg.AllowEmpty = *allowEmpty
 		case "dump-unexpected":
 			cfg.DumpUnexpected = *dumpPath
 		case "dump-rate":
