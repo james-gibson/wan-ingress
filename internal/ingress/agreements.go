@@ -22,7 +22,7 @@ type agreementsFile struct {
 }
 
 // Route is what the resolver returns for an accepted name. Every field is read
-// from an Agreement, never synthesised from the input.
+// from an Agreement, never synthesized from the input.
 type Route struct {
 	Address     string `json:"address"`
 	Namespace   string `json:"namespace"`

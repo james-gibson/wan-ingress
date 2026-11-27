@@ -11,8 +11,9 @@ import (
 
 // TestFeatureIsTheOrigin is the Gherkin-first gate: the binary's declaration
 // is read by isotope itself, from the same feature the shell-to-gherkin canon
-// validated (isotope 8R0ZXcvOD_Z0xdQ0qGKEuA9ZlfLTGfF6rCxm4W_tF9o, 111 tokens,
-// 19 parts: routing, the two fuzz regressions, monitor/self-healing). The
+// validated (isotope VEy5JA5oqzwueYNPiRpoNBvzPYV_hnxlheiQA5h9tjg, 122 tokens,
+// 21 parts: routing, the two fuzz regressions, monitor/self-healing, and the
+// split between a resolution and a forward). The
 // validator's result and this test cannot drift independently.
 func TestFeatureIsTheOrigin(t *testing.T) {
 	path := filepath.Join("..", "..", "features", "wan-ingress.feature")
@@ -40,6 +41,9 @@ func TestFeatureIsTheOrigin(t *testing.T) {
 	second, err := isotope.CanonicalizeGherkinToIsotope(text, []byte("seed-42"), "wan-ingress", 1)
 	if err != nil || second.Signature != first.Signature || second.Raw != first.Raw {
 		t.Fatalf("canon is not stable: first=%+v second=%+v err=%v", first, second, err)
+	}
+	if got := first.Signature; got != "6ebfe5f8f5145c7eebf2ae08e4792ca2a55faae9585823281f5deffe4b6fe115" {
+		t.Fatalf("origin signature = %s, want 6ebfe5f8f5145c7e…", got)
 	}
 	t.Logf("origin isotope=%s signature=%s tokens=%d", first.String(), first.Signature, strings.Count(first.Raw, "\n")+1)
 }

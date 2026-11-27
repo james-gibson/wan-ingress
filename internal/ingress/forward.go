@@ -61,7 +61,7 @@ func (f *Forwarder) Forward(ctx context.Context, route Route, name string, body 
 	digest := sha256.Sum256(body)
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, f.BorderKey)
-	fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s",
+	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s",
 		http.MethodPost, u.EscapedPath(), route.Namespace, hex.EncodeToString(digest[:]), timestamp)
 	req.Header.Set("X-Lab-Signature", hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-Lab-Namespace", route.Namespace)

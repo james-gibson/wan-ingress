@@ -23,6 +23,20 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      - run: go vet ./...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+      - name: The border's freshness contract
+        run: python3 -m unittest discover -s harness -p '*_test.py' -v
+      - name: The shipped example refuses to start
+        shell: bash
+        run: |
+          go build -o /tmp/wan-ingress ./cmd/wan-ingress
+          if /tmp/wan-ingress -check-config -config configs/wan-ingress.example.json; then
+            echo "the example config started; a placeholder is a published credential" >&2
+            exit 1
+          fi
       - name: Fuzz smoke — 30s per target
         shell: bash
         run: |

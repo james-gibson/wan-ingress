@@ -39,6 +39,7 @@ type rpcResponse struct {
 type probeStatus struct {
 	Ready       bool              `json:"ready"`
 	Defensive   bool              `json:"defensive"`
+	Resolved    uint64            `json:"resolved"`
 	Forwarded   uint64            `json:"forwarded"`
 	Quarantined map[string]uint64 `json:"quarantined"`
 }
@@ -71,11 +72,11 @@ func (s *Server) serveMonitor(w http.ResponseWriter, r *http.Request) {
 	case "initialize":
 		resp.Result = s.initializeResult()
 	case "ingress/status":
-		forwarded, quarantined := s.Observer.Snapshot()
+		resolved, forwarded, quarantined := s.Observer.SnapshotAll()
 		ready := s.ready()
 		resp.Result = probeStatus{
 			Ready: ready, Defensive: !ready || forwarded == 0,
-			Forwarded: forwarded, Quarantined: quarantined,
+			Resolved: resolved, Forwarded: forwarded, Quarantined: quarantined,
 		}
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}

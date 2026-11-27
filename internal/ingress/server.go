@@ -62,7 +62,7 @@ func (s *Server) serveResolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	decision := s.Resolver.Resolve(rawQueryValue(r.URL.RawQuery, "name"))
-	s.Observer.Record(decision)
+	s.Observer.RecordResolve(decision)
 	status := http.StatusUnprocessableEntity
 	if decision.Decision == "forward" {
 		status = http.StatusOK

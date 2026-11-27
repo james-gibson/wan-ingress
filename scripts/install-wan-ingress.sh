@@ -25,6 +25,11 @@ LOGDIR="${LOGDIR:-$HOME/Library/Logs}"
 [ -x "$BINARY" ] || { echo "binary not found or not executable: $BINARY" >&2; exit 1; }
 BINARY="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
 CONFIG="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
+
+# Probe the effect before writing a unit. A KeepAlive supervisor around a
+# refused config restarts forever and fills the log; refuse to install instead.
+"$BINARY" -check-config -config "$CONFIG"
+
 mkdir -p "$LOGDIR"
 
 case "$(uname -s)" in

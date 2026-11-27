@@ -51,8 +51,8 @@ func TestReloadSwapsPolicyAndKeepsCounters(t *testing.T) {
 	}
 
 	agreements := filepath.Join(t.TempDir(), "agreements.json")
-	if err := os.WriteFile(agreements, []byte(testAgreement), 0o600); err != nil {
-		t.Fatalf("write agreements: %v", err)
+	if writeErr := os.WriteFile(agreements, []byte(testAgreement), 0o600); writeErr != nil {
+		t.Fatalf("write agreements: %v", writeErr)
 	}
 	second, err := NewServer(Config{
 		Agreements: agreements, Token: testToken, BorderKey: testKey,

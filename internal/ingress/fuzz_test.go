@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,7 @@ func fuzzResolver(t *testing.T) *Resolver {
 }
 
 // FuzzResolveName: every input maps to a route from the agreement, or to a
-// typed refusal with no route. It is total, deterministic and non-synthesising.
+// typed refusal with no route. It is total, deterministic and non-synthesizing.
 func FuzzResolveName(f *testing.F) {
 	for _, seed := range []string{"42", "WS42", "nowhere", "localhost", "0.0.0.0", "::1", "a/../b", "%2e%2e", "%00", "", strings.Repeat("a", MaxNameBytes+1)} {
 		f.Add(seed)
@@ -47,7 +48,7 @@ func FuzzResolveName(f *testing.F) {
 				t.Fatalf("forward without a clean route: %+v", first)
 			}
 			if first.Route.Address != fuzzBorder || first.Route.Namespace != "session-42" {
-				t.Fatalf("route was synthesised: %+v", first.Route)
+				t.Fatalf("route was synthesized: %+v", first.Route)
 			}
 		case "quarantine":
 			if first.Reason == "" || first.Route != nil {
@@ -79,7 +80,7 @@ func FuzzQuarantineContract(f *testing.F) {
 		observer := NewObserver()
 		observer.Record(decision)
 		recorder := httptest.NewRecorder()
-		observer.ServeStatus(false, recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+		observer.ServeStatus(false, recorder, httptest.NewRequest(http.MethodGet, "/status", http.NoBody))
 		var counts statusBody
 		if err := json.Unmarshal(recorder.Body.Bytes(), &counts); err != nil {
 			t.Fatalf("decode status: %v", err)
@@ -205,7 +206,7 @@ func FuzzConfig(f *testing.F) {
 			}
 		}
 		if _, err := (&Forwarder{}).Forward(context.Background(),
-			Route{Address: fuzzBorder, Namespace: "session-42"}, "42", []byte("x")); err != ErrBorderUnconfigured {
+			Route{Address: fuzzBorder, Namespace: "session-42"}, "42", []byte("x")); !errors.Is(err, ErrBorderUnconfigured) {
 			t.Fatalf("forward without a key returned %v", err)
 		}
 	})

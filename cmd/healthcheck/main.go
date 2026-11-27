@@ -22,9 +22,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	statusErr := error(nil)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		fmt.Fprintf(os.Stderr, "health status %s\n", resp.Status)
+		statusErr = fmt.Errorf("health status %s", resp.Status)
+	}
+	_ = resp.Body.Close()
+	if statusErr != nil {
+		fmt.Fprintln(os.Stderr, statusErr)
 		os.Exit(1)
 	}
 }

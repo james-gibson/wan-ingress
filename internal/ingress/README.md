@@ -164,7 +164,7 @@ the delete is best-effort and the 5m TTL is the authority until that lands.
 ## Verification
 
 - `features/wan-ingress.feature` is the origin (isotope
-  `8R0ZXcvOD_Z0xdQ0qGKEuA9ZlfLTGfF6rCxm4W_tF9o`, 19 parts); `go test
+  `VEy5JA5oqzwueYNPiRpoNBvzPYV_hnxlheiQA5h9tjg`, 21 parts); `go test
   ./internal/ingress` inverts it with `httptest`, including the capturing
   border, the probe handshake, the registry lease, and the reload switch.
 - `harness/spike.sh` is the rung-2 check: the lab's own smoke-alarm and

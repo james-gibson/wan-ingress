@@ -1,0 +1,9 @@
+{
+  "addr": "0.0.0.0:8443",
+  "agreements": "/etc/wan-ingress/agreements.json",
+  "token": "REPLACE_WITH_RANDOM_32_BYTE_TOKEN",
+  "border_key": "REPLACE_WITH_RANDOM_32_BYTE_TOKEN",
+  "smoke_alarm": "http://127.0.0.1:19100",
+  "tls_cert": "/etc/wan-ingress/fullchain.pem",
+  "tls_key": "/etc/wan-ingress/privkey.pem"
+}
