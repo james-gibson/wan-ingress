@@ -38,6 +38,8 @@ var (
 	tlsCert    = flag.String("tls-cert", "", "PEM certificate for TLS termination")
 	tlsKey     = flag.String("tls-key", "", "PEM private key for TLS termination")
 	plaintext  = flag.Bool("allow-plaintext-wan", false, "bind publicly without TLS; TLS must be terminated in front")
+	node       = flag.String("node", "", "this ingress's name in a route path (required in a sub-cluster)")
+	peers      = flag.String("peers", "", "comma-separated IPs/CIDRs whose route path is believed")
 )
 
 func main() {
@@ -188,8 +190,23 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.TLSKey = *tlsKey
 		case "allow-plaintext-wan":
 			cfg.AllowPlaintextWAN = *plaintext
+		case "node":
+			cfg.Node = *node
+		case "peers":
+			cfg.Peers = splitList(*peers)
 		}
 	})
+}
+
+// splitList reads a comma-separated flag into a slice, treating empty as none.
+func splitList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // endpointURL turns a listener address into the URL a dependent dials. A

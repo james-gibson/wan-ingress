@@ -41,6 +41,9 @@ func CheckDeployable(cfg Config) error {
 		return fmt.Errorf("border_key is a placeholder; generate one with: openssl rand -base64 32")
 	}
 
+	if len(cfg.Peers) > 0 && cfg.Node == "" {
+		return fmt.Errorf("peers are configured but node is empty: a trusted path would never be extended, so the loop check would be silently off")
+	}
 	public, err := isPublicBind(cfg.Addr)
 	if err != nil {
 		return err

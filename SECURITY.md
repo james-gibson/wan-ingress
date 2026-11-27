@@ -65,6 +65,10 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | stale captured envelope | `X-Lab-Timestamp` outside ±60s | border refuses | `harness/border_adapter_test.py` |
 | a resolution counted as a forward | the monitor's green light | only `/forward` advertises `ingress/forward` | `TestResolveAloneDoesNotAdvertiseForwarding` |
 | anonymous status scraping | `/status`, `/mcp`, `/readyz` | counters and readiness only; no route, address or namespace | `TestAnonymousSurfacesLeakNoRoute` |
+| a route that already contains this node | `X-Lab-Path` | `422 path_loop`, refused before the body and before the border | `TestRouteContainingThisNodeIsRefused` |
+| an anonymous caller naming a node | `X-Lab-Path` from a non-peer | discarded; the path starts fresh at this node | `TestUntrustedPathIsDiscarded` |
+| rewriting the path or the policy in transit | both are inside the HMAC | the border's signature check fails | `harness/border_adapter_test.py` |
+| two nodes running different declarations | `GET /policy` | same declaration → same isotope; a difference is visible from outside either node | `TestTheSameDeclarationDerivesTheSameIsotope`, `TestADifferentDeclarationDerivesADifferentIsotope` |
 
 ### Measured, not asserted
 
@@ -94,10 +98,31 @@ discovers.
    (`Scenario: a known name resolves to an agreed border address and
    namespace`), so the token is a topology-read capability, not just admission.
    Treat a leaked token as a leaked map.
-3. **No rate limit.** An attacker can spend unlimited requests. With a 32-byte
-   random token the guessing cost is prohibitive, so the residual is
-   **availability**, not admission. Terminate at an edge that rate-limits, or
-   accept the DoS surface.
+3. **No rate limit and no connection bound.** Admission is not the residual —
+   a 32-byte token makes guessing prohibitive. The residual is **availability**,
+   and the resource that matters is not upstream: a refused caller never reaches
+   the border, so upstream bandwidth cannot bound the refusal path. The two
+   paths consume disjoint resources.
+
+   Measured on loopback (2026-11-26, front and client sharing one machine, so
+   the server's share is smaller than these wall-clock numbers):
+
+   | path | rate |
+   | --- | --- |
+   | refused, keep-alive | ~60,000 req/s |
+   | refused, fresh TLS per request | ~3,556 req/s |
+   | accepted, 1 MiB body | ~1,610 req/s (1.6 GiB/s) |
+   | accepted, 1 KiB body | ~13,820 req/s |
+
+   A refusal is cheap; a *handshake* is ~17x a refusal. So the expensive thing
+   an anonymous caller does is not "be refused", it is "make the front do a
+   handshake" — which is why the first control is a connection bound, not a
+   request-rate bucket. The accepted path is bounded by the border's capacity
+   and by bytes/s, so a request limit there is fairness, not defence.
+
+   The cheap refusal is a property to keep: the 403 reads no body and writes no
+   log line. Adding a synchronous access log before the auth check would make
+   the log the amplifier.
 4. **No per-caller audit log.** `/status` counts decisions by reason, not by
    caller. If you need attribution, log at the edge or in the border.
 5. **The registry is trusted and unauthenticated.** `Register`/`Deregister`
@@ -113,7 +138,22 @@ discovers.
    certificate loaded by `ServeTLS`.
 8. **HTTP/1.1 and HTTP/2 by default.** No cipher allow-list, no HSTS, no OCSP
    stapling. Terminate TLS at an edge if you need that policy surface.
-9. **`addr` is not re-read on reload.** The listener is the deployment; the
+9. **Peers are trusted by address, not by credential.** A path is believed when
+   the TCP peer is inside a configured CIDR. A spoofed source cannot complete a
+   handshake, so this is stronger than it sounds, but a compromised host inside
+   the range can write a path — and a path is evidence, not authority
+   (`lab/SPLASH.md`: *holding an isotope is not reachability*). If a peer set is
+   configured, give each peer its own credential rather than relying on the
+   network location.
+10. **`/policy` is public.** It publishes a derived digest and two counts, never a
+    route, address or namespace. A digest is a confirmation oracle for a guessed
+    declaration; the declaration is operator-owned and the token is the secret,
+    so the disclosure is bounded — but it is a disclosure.
+11. **The policy isotope detects divergence; it does not resolve it.** A node
+    with a stale declaration reports a stale isotope, which is the point, but
+    the front does not refuse to serve on a mismatch — it has nothing to compare
+    against. The border or a peer does the comparison.
+12. **`addr` is not re-read on reload.** The listener is the deployment; the
    policy is what `SIGHUP` swaps. Changing `addr` in the file has no effect
    until a restart, which is logged.
 

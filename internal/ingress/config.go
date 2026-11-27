@@ -20,6 +20,16 @@ type Config struct {
 	BorderKey  string `json:"border_key,omitempty"`
 	SmokeAlarm string `json:"smoke_alarm,omitempty"`
 
+	// Node is this instance's name in a route path. Empty means the path is not
+	// extended, which is the single-instance case. In a sub-cluster every
+	// instance needs its own value, or the loop check refuses its peers.
+	Node string `json:"node,omitempty"`
+
+	// Peers are the addresses whose route path is believed. A path from any
+	// other source is ignored, so an anonymous caller cannot name a node and
+	// have it refuse a request it never saw.
+	Peers []string `json:"peers,omitempty"`
+
 	// TLSCert and TLSCertKey terminate TLS in this process. A public bind
 	// without them is refused unless AllowPlaintextWAN is set, and that flag
 	// means "TLS is terminated in front of me", not "TLS does not matter".
@@ -68,11 +78,17 @@ func NewServer(cfg Config, observer *Observer) (*Server, error) {
 	if observer == nil {
 		observer = NewObserver()
 	}
+	peers, err := ParsePeers(cfg.Peers)
+	if err != nil {
+		return nil, err
+	}
 	srv := &Server{
 		Resolver:  resolver,
-		Forwarder: &Forwarder{BorderKey: []byte(cfg.BorderKey)},
+		Forwarder: &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
 		Token:     cfg.Token,
 		Observer:  observer,
+		Node:      cfg.Node,
+		Peers:     peers,
 	}
 	srv.Handler() // build the mux once, at swap time
 	return srv, nil

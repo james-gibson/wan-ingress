@@ -26,6 +26,13 @@ const maxForwardBody = 1 << 20
 type Forwarder struct {
 	Client    *http.Client
 	BorderKey []byte
+
+	// Node is this ingress in the route path; Policy is the derived isotope of
+	// the declaration the route was resolved under. Both travel inside the
+	// signature, so a stale route table is a refusal at the border rather than
+	// a silently wrong forward.
+	Node   string
+	Policy string
 }
 
 // Ready reports whether a signed border is configured.
@@ -36,6 +43,12 @@ func (f *Forwarder) Ready() bool {
 // Forward copies the route's address into a URL, signs the envelope and posts
 // the body. Any destination supplied by the caller is ignored.
 func (f *Forwarder) Forward(ctx context.Context, route Route, name string, body []byte) (int, error) {
+	return f.ForwardPath(ctx, route, name, body, nil)
+}
+
+// ForwardPath is Forward with the route's history. The path is part of the
+// signed material, so a hop cannot be added or removed in transit.
+func (f *Forwarder) ForwardPath(ctx context.Context, route Route, name string, body []byte, hops []string) (int, error) {
 	if !f.Ready() || route.Address == "" {
 		return 0, ErrBorderUnconfigured
 	}
@@ -61,10 +74,13 @@ func (f *Forwarder) Forward(ctx context.Context, route Route, name string, body 
 	digest := sha256.Sum256(body)
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, f.BorderKey)
-	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s",
-		http.MethodPost, u.EscapedPath(), route.Namespace, hex.EncodeToString(digest[:]), timestamp)
+	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s\n%s\n%s",
+		http.MethodPost, u.EscapedPath(), route.Namespace, f.Policy, FormatPath(hops),
+		hex.EncodeToString(digest[:]), timestamp)
 	req.Header.Set("X-Lab-Signature", hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-Lab-Namespace", route.Namespace)
+	req.Header.Set("X-Lab-Policy", f.Policy)
+	req.Header.Set("X-Lab-Path", FormatPath(hops))
 	req.Header.Set("X-Lab-Timestamp", timestamp)
 	req.Header.Set("Content-Type", "application/octet-stream")
 

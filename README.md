@@ -9,9 +9,9 @@ config and its agreement file.
 
 | field | value |
 | --- | --- |
-| isotope (origin feature) | `VEy5JA5oqzwueYNPiRpoNBvzPYV_hnxlheiQA5h9tjg` |
-| signature prefix (key `seed-42`) | `6ebfe5f8f5145c7e…` |
-| tokens / parts | 122 / 21 |
+| isotope (origin feature) | `GWGMG0iJKGjU4O1lo2w1CNQ_60GtQwMxB0O8MTOZaYA` |
+| signature prefix (key `seed-42`) | `1aa432915a39bf60…` |
+| tokens / parts | 144 / 25 |
 
 The origin is [`features/wan-ingress.feature`](features/wan-ingress.feature),
 written and validated before the first line of Go.
@@ -38,6 +38,8 @@ shell-to-gherkin canon validated, and the signature above is reproduced by
 - `POST /forward?name=<raw>` → HMAC-signed border envelope, or a typed refusal
   (`border_unconfigured` included); caller-supplied address headers are ignored
 - `GET /status` → resolved and forwarded counts, and quarantines by reason
+- `GET /policy` → the derived isotope of the agreement file, and its size; never
+  a route, address or namespace
 - `POST /mcp` → JSON-RPC probe surface for smoke-alarm (`initialize`,
   `ingress/status`, `notifications/initialized`)
 
@@ -79,6 +81,27 @@ reported as the cost of the boundary, not as the security finding. A second run
 compares held connections against new ones: holding reuses one ingress↔border
 and one border↔target connection across 60 calls, while the new-connection mode
 opens 61 of each and shows the churn cost.
+
+## In a sub-cluster
+
+A path vector, so a route cannot contain itself (`lab/SPLASH.md` → *The proxy*;
+`lab/SLA.md` §12):
+
+```json
+{ "node": "wan-a", "peers": ["10.0.0.0/24"] }
+```
+
+- every forward appends this node to `X-Lab-Path`, which is inside the signature;
+- a route whose path already contains this node is `422 path_loop`, refused
+  before the body is read and before the border is contacted;
+- a path is believed only when the TCP peer is in `peers` — otherwise an
+  anonymous caller could name a node and have it refuse on someone else's behalf.
+
+And the declaration is *derived, not stored*: every node reports the isotope of
+the agreement file it is running at `GET /policy`, so two nodes that disagree are
+visible from outside either of them. That is a cheap equality test in place of
+fast gossip — you do not need convergence to be invisible if divergence is
+observable.
 
 ## Self-healing
 

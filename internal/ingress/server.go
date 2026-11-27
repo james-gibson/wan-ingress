@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +16,8 @@ type Server struct {
 	Forwarder *Forwarder
 	Token     string
 	Observer  *Observer
+	Node      string
+	Peers     PeerSet
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -42,6 +45,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		s.Observer.ServeStatus(s.ready(), w, r)
 	})
+	// The derived declaration, published so another node or a monitor can
+	// answer "do we agree?" without reading the file. No route contents.
+	mux.HandleFunc("GET /policy", s.servePolicy)
 	mux.HandleFunc("GET /resolve", s.serveResolve)
 	mux.HandleFunc("POST /forward", s.serveForward)
 	mux.HandleFunc("POST /mcp", s.serveMonitor)
@@ -92,6 +98,13 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A loop is refused before the body is read: a refusal should not cost the
+	// caller an upload.
+	path, ok := s.routePath(w, r)
+	if !ok {
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody+1))
 	if err != nil || len(body) > maxForwardBody {
 		refusal := quarantine("malformed")
@@ -99,8 +112,7 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 		writeDecision(w, http.StatusUnprocessableEntity, refusal)
 		return
 	}
-
-	status, err := s.Forwarder.Forward(r.Context(), *decision.Route, rawName, body)
+	status, err := s.Forwarder.ForwardPath(r.Context(), *decision.Route, rawName, body, path)
 	if err != nil {
 		refusal := quarantine("upstream")
 		s.Observer.Record(refusal)
@@ -111,6 +123,47 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request) {
 	forwarded := Decision{Decision: "forward", Route: decision.Route, UpstreamStatus: status}
 	s.Observer.Record(forwarded)
 	writeDecision(w, http.StatusOK, forwarded)
+}
+
+// servePolicy publishes the derived isotope of the declaration this node is
+// running. It is unauthenticated on purpose: it is a digest and two counts, it
+// is what a peer compares against, and a value that cannot be read from outside
+// the node that computed it is not checkable (lab/SPLASH.md, *Derived values*).
+func (s *Server) servePolicy(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.Resolver.Summary())
+}
+
+// routePath extends the route history with this node. A caller-supplied path is
+// believed only from a configured peer; otherwise it is discarded so that an
+// anonymous caller cannot make this node refuse a request on another's behalf.
+func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	var carried []string
+	if s.Peers.Contains(r.RemoteAddr) {
+		parsed, err := ParsePath(r.Header.Get(pathHeader))
+		if err != nil {
+			s.refuse(w, "malformed")
+			return nil, false
+		}
+		carried = parsed
+	}
+	path, err := AppendHop(carried, s.Node)
+	if err != nil {
+		reason := "path_loop"
+		if !errors.Is(err, ErrPathLoop) {
+			reason = "malformed"
+		}
+		s.refuse(w, reason)
+		return nil, false
+	}
+	return path, true
+}
+
+// refuse records and answers one typed quarantine.
+func (s *Server) refuse(w http.ResponseWriter, reason string) {
+	refusal := quarantine(reason)
+	s.Observer.Record(refusal)
+	writeDecision(w, http.StatusUnprocessableEntity, refusal)
 }
 
 func writeDecision(w http.ResponseWriter, status int, decision Decision) {

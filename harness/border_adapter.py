@@ -43,9 +43,11 @@ def verify(key: bytes, path: str, namespace: str, body: bytes, headers) -> bool:
         return False
     digest = hashlib.sha256(body).hexdigest()
     escaped = urllib.parse.quote(path, safe="/")
+    policy = headers.get("X-Lab-Policy", "")
+    route_path = headers.get("X-Lab-Path", "")
     expected = hmac.new(
         key,
-        ("POST\n%s\n%s\n%s\n%s" % (escaped, namespace, digest, timestamp)).encode(),
+        ("POST\n%s\n%s\n%s\n%s\n%s\n%s" % (escaped, namespace, policy, route_path, digest, timestamp)).encode(),
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(signature, expected)

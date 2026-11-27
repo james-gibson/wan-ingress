@@ -142,6 +142,38 @@ Feature: WAN ingress — the resolver forwards only by agreement
     When I stop the ingress process
     Then the alarm classifies the target as "unhealthy"
 
+  # A route carries its own history (SPLASH.md *The proxy*: path vectors, so a
+  # route cannot contain itself). A node that has already seen a request must
+  # not see it again; the refusal is structural, not a timeout.
+  Scenario: a route that contains this node is refused
+    Given a fresh process named "wan-a" that trusts its peer and has a border key
+    When I run "curl -sS -w '\n%{http_code}' '<addr>/forward?name=42' -H 'Authorization: Bearer <token>' -H 'X-Lab-Path: wan-b,wan-a'"
+    Then the command exits 0
+    And the body has status "422"
+    And the JSON field "reason" is "path_loop"
+
+  Scenario: an untrusted caller cannot name a node in the path
+    Given a fresh process named "wan-a" with no trusted peers, a border key and an agreement mapping "42"
+    When I run "curl -sS '<addr>/forward?name=42' -H 'Authorization: Bearer <token>' -H 'X-Lab-Path: wan-b'"
+    Then the command exits 0
+    And the JSON field "decision" is "forward"
+
+  # The declaration is derived, not stored (SPLASH.md *Derived values*). Every
+  # node reports the isotope of what it is running, so two nodes that disagree
+  # are visible from outside either of them.
+  Scenario: the same declaration derives the same route isotope on every node
+    Given two fresh processes with the same agreement mapping "42" to namespace "session-42"
+    When I fetch "<addr>/policy" from each
+    Then the command exits 0
+    And both bodies carry the same "isotope"
+    And neither body carries an agreed border address
+
+  Scenario: a different declaration derives a different route isotope
+    Given two fresh processes, one mapping "42" to namespace "session-42" and one to namespace "session-43"
+    When I fetch "<addr>/policy" from each
+    Then the command exits 0
+    And the two "isotope" values differ
+
   # A registry name is a lease: renew it while serving, ask the registry to drop
   # it on a clean exit, and let a crash expire it. The beat retries; it is never
   # fatal. Until smoke-alarm#112 lands, the delete is best-effort and the TTL is
