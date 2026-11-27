@@ -375,3 +375,19 @@ func TestAnonymousSurfacesLeakNoRoute(t *testing.T) {
 		}
 	}
 }
+
+// The namespace is spliced into the border's path. An agreement file is
+// operator-owned, but a typo or a bad template must fail loudly rather than
+// silently rewrite the route, which the signature would then bless.
+func TestAgreementNamespaceCannotEscapeItsPathSegment(t *testing.T) {
+	for _, namespace := range []string{"../admin", "session/../../x", "session\\42", ".", "..", "", "session\x00"} {
+		body := fmt.Sprintf(`{"agreements":[{"id":"a","namespace":%q,"border":"http://127.0.0.1:1/cluster","aliases":["42"]}]}`, namespace)
+		if _, err := LoadAgreements(strings.NewReader(body)); err == nil {
+			t.Fatalf("accepted namespace %q", namespace)
+		}
+	}
+	body := `{"agreements":[{"id":"a","namespace":"session-42","border":"http://127.0.0.1:1/cluster","aliases":["42"]}]}`
+	if _, err := LoadAgreements(strings.NewReader(body)); err != nil {
+		t.Fatalf("refused a valid namespace: %v", err)
+	}
+}

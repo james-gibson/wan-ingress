@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 )
 
 // Agreement is an operator-authored mapping. It is the only source of a
@@ -61,6 +62,12 @@ func LoadAgreements(r io.Reader) (*Resolver, error) {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return nil, fmt.Errorf("agreement %q: border must be an http(s) URL", a.ID)
 		}
+		// The namespace becomes a path segment on the border. An operator typo
+		// must not be able to walk out of it: path.Join would clean "../../x"
+		// into a different route, and the signature would bless the result.
+		if !safeSegment(a.Namespace) {
+			return nil, fmt.Errorf("agreement %q: namespace %q must be one path segment", a.ID, a.Namespace)
+		}
 		for _, alias := range a.Aliases {
 			name, err := ParseName(alias)
 			if err != nil {
@@ -105,6 +112,23 @@ func (r *Resolver) Resolve(raw string) Decision {
 
 func quarantine(reason string) Decision {
 	return Decision{Decision: "quarantine", Reason: reason}
+}
+
+// safeSegment reports whether a value can be one path segment without escaping
+// the route the agreement declared.
+func safeSegment(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	if strings.ContainsAny(value, "/\\") {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func hasIndex(indexes []int, want int) bool {
