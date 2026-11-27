@@ -64,6 +64,8 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | duplicate `name` parameters | `?name=42&name=evil` | first wins for both resolve and forward | `TestDuplicateNameParametersResolveAndForwardTheSameName` |
 | stale captured envelope | `X-Lab-Timestamp` outside the window | border refuses | `harness/border_adapter_test.py` |
 | a route past its span | `X-Lab-Route-Start` | `422 route_dissolved`, border never contacted | `TestDissolvedRouteIsRefusedBeforeTheBorder` |
+| two edges that disagree on "now" | stamped hop vs `peer_window_ms` | `422 clock_disagreement` | `TestPeerWindowRefusesAClockDisagreement` |
+| a peer hop with no stamp | missing `@ms` | `422 clock_disagreement` — silence is not agreement | `TestUnstampedPeerHopIsADisagreement` |
 | a hop backdating a route | the start is inside the signature | the border's signature check fails | `harness/border_adapter_test.py` |
 | a resolution counted as a forward | the monitor's green light | only `/forward` advertises `ingress/forward` | `TestResolveAloneDoesNotAdvertiseForwarding` |
 | anonymous status scraping | `/status`, `/mcp`, `/readyz` | counters and readiness only; no route, address or namespace | `TestAnonymousSurfacesLeakNoRoute` |
@@ -85,6 +87,7 @@ bounds, and they answer different questions.
 | --- | --- | --- | --- |
 | **link window** (`--skew-ms`) | one hop | 5 s (the grace tick) | is this envelope too old for *this link*? |
 | **route span** (`route_span_ms`) | the whole path | 15 s (three grace ticks) | has this route chained more grace than a path may spend? |
+| **peer window** (`peer_window_ms`) | one edge link | 100 ms | do two adjacent edges agree on "now"? |
 
 The link window is wide for cluster nodes because the grace tick is wide: a node
 may present the previous tick's path. The span is what stops grace from chaining
@@ -108,6 +111,30 @@ Cluster links stay wide:
 | LAN edge | 25–100 ms (measured to 1 ms) |
 | cluster node | 5 s (the grace tick) |
 | route span | 15 s, then dissolution |
+
+### The peer window is a jitter discriminator, not a tamper detector
+
+The tight window between edges is the frequency discriminator: a hop carries the
+instant it appended itself, and the next edge judges that stamp against its own
+clock. That is what settles a wobble in one round trip instead of waiting for the
+path to age out.
+
+It is a **jitter** bound, and it has a measured false-positive curve. On dmz,
+2,000 forwards per cell, a stamped peer hop on every request:
+
+| peer window | c=8 dissolved | c=32 dissolved |
+| --- | --- | --- |
+| 1 ms | 1,685 (84%) | 1,880 (94%) |
+| 5 ms | 64 (3.2%) | 1,168 (58%) |
+| 25 ms | 0 | 33 (1.65%) |
+| 100 ms | 0 | 0 |
+
+The window must exceed **one-way delay + clock skew + the edge's queueing tail**,
+not just the RTT: at c=32 this board's p99 is ~49 ms, so 25 ms holds at c=8 and
+starts dissolving at c=32, while 100 ms holds at both. That is why the concurrency
+cap and the shape budgets matter here too — bounding the queue bounds the jitter
+tail, and a bounded tail is what lets the window be tight. Tight window, bounded
+queue: wobble found fast. Wide window, unbounded queue: wobble hidden in the noise.
 
 ### Why a wobbling node destroys the path
 

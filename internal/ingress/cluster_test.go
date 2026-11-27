@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The declaration is derived, not stored (lab/SPLASH.md, *Derived values*):
@@ -121,12 +122,14 @@ func clusterServer(t *testing.T, node string, peers []string, namespace string) 
 	return httptest.NewServer(server.Handler()), border
 }
 
+func nowMS() string { return fmt.Sprintf("%d", time.Now().UnixMilli()) }
+
 func TestRouteContainingThisNodeIsRefused(t *testing.T) {
 	srv, border := clusterServer(t, "wan-a", []string{"127.0.0.1"}, "")
 	defer srv.Close()
 
 	headers := authHeaders()
-	headers[pathHeader] = "wan-b,wan-a"
+	headers[pathHeader] = "wan-b@" + nowMS() + ",wan-a@" + nowMS()
 	status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers)
 	if status != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d (%s), want 422", status, body)
@@ -146,14 +149,14 @@ func TestUntrustedPathIsDiscarded(t *testing.T) {
 	// No peers: the header is a caller's wish and is dropped, so an anonymous
 	// caller cannot name a node and have it refuse a request it never saw.
 	headers := authHeaders()
-	headers[pathHeader] = "wan-b"
+	headers[pathHeader] = "wan-b@" + nowMS()
 	status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d (%s), want 200", status, body)
 	}
 	got, _, _ := border.last()
-	if got.Get(pathHeader) != "wan-a" {
-		t.Fatalf("border path = %q, want the fresh path wan-a", got.Get(pathHeader))
+	if path := got.Get(pathHeader); !strings.HasPrefix(path, "wan-a@") || strings.Contains(path, ",") {
+		t.Fatalf("border path = %q, want a fresh route rooted at wan-a", path)
 	}
 }
 
@@ -162,13 +165,13 @@ func TestTrustedPathIsExtendedAndSigned(t *testing.T) {
 	defer srv.Close()
 
 	headers := authHeaders()
-	headers[pathHeader] = "wan-b,wan-c"
+	headers[pathHeader] = "wan-b@" + nowMS() + ",wan-c@" + nowMS()
 	status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d (%s)", status, body)
 	}
 	got, _, _ := border.last()
-	if path := got.Get(pathHeader); path != "wan-b,wan-c,wan-a" {
+	if path := got.Get(pathHeader); !strings.HasPrefix(path, "wan-b@") || !strings.HasSuffix(path, ",wan-a@") && !strings.Contains(path, ",wan-a@") {
 		t.Fatalf("border path = %q, want wan-b,wan-c,wan-a", path)
 	}
 	if policy := got.Get("X-Lab-Policy"); policy == "" {
@@ -183,11 +186,11 @@ func TestPathIsBounded(t *testing.T) {
 	if _, err := ParsePath(strings.Repeat("a,", maxPathHops)); err == nil {
 		t.Fatal("a path over the hop limit was accepted")
 	}
-	path := make([]string, maxPathHops)
+	path := make([]Hop, maxPathHops)
 	for i := range path {
-		path[i] = fmt.Sprintf("n%d", i)
+		path[i] = Hop{Name: fmt.Sprintf("n%d", i), At: time.Now().UnixMilli()}
 	}
-	if _, err := AppendHop(path, "wan-a"); err == nil {
+	if _, err := AppendHop(path, "wan-a", time.Now().UnixMilli()); err == nil {
 		t.Fatal("a path over the hop limit was extended")
 	}
 }
@@ -201,7 +204,11 @@ func TestPolicyAndPathAreInsideTheSignature(t *testing.T) {
 		defer borderSrv.Close()
 		target := Route{Address: borderSrv.URL + "/cluster", Namespace: "session-42"}
 		f := &Forwarder{BorderKey: []byte(testKey), Policy: policy}
-		if _, err := f.ForwardPath(t.Context(), target, "42", []byte("x"), strings.Split(path, ",")); err != nil {
+		hops, err := ParsePath(path)
+		if err != nil {
+			t.Fatalf("parse path: %v", err)
+		}
+		if _, err := f.ForwardPath(t.Context(), target, "42", []byte("x"), hops); err != nil {
 			t.Fatalf("forward: %v", err)
 		}
 		h, _, _ := border.last()
@@ -245,14 +252,14 @@ func TestPathIsNotBelievedThroughATerminator(t *testing.T) {
 	defer srv.Close()
 
 	headers := authHeaders()
-	headers[pathHeader] = "wan-b"
+	headers[pathHeader] = "wan-b@" + nowMS()
 	status, body := doRequest(t, srv.Client(), http.MethodPost, srv.URL+"/forward?name=42", headers)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d (%s)", status, body)
 	}
 	got, _, _ := border.last()
-	if path := got.Get(pathHeader); path != "wan-a" {
-		t.Fatalf("border path = %q, want the client path discarded (wan-a)", path)
+	if path := got.Get(pathHeader); !strings.HasPrefix(path, "wan-a@") || strings.Contains(path, ",") {
+		t.Fatalf("border path = %q, want the client path discarded", path)
 	}
 }
 

@@ -48,6 +48,10 @@ type Config struct {
 	// is three grace ticks (15s); a link may spend it at any baud.
 	RouteSpanMS int `json:"route_span_ms,omitempty"`
 
+	// PeerWindowMS is how far two adjacent edges' clocks may disagree. Tighter
+	// than the route span: the span accepts a path's age, this judges one link.
+	PeerWindowMS int `json:"peer_window_ms,omitempty"`
+
 	// BanLog is a file of ban lines a host-side filter (fail2ban) can read, and
 	// NeverBan is the allowlist. Enforcement stays outside the front so a bad
 	// threshold cannot lock an operator out of the fix.
@@ -117,14 +121,15 @@ func NewServer(cfg Config, observer *Observer) (*Server, error) {
 		return nil, err
 	}
 	srv := &Server{
-		Resolver:    resolver,
-		Forwarder:   &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
-		Token:       cfg.Token,
-		Observer:    observer,
-		Node:        cfg.Node,
-		RouteSpanMS: cfg.RouteSpanMS,
-		Peers:       peers,
-		Terminator:  terminators,
+		Resolver:     resolver,
+		Forwarder:    &Forwarder{BorderKey: []byte(cfg.BorderKey), Node: cfg.Node, Policy: resolver.PolicyIsotope()},
+		Token:        cfg.Token,
+		Observer:     observer,
+		Node:         cfg.Node,
+		RouteSpanMS:  cfg.RouteSpanMS,
+		PeerWindowMS: cfg.PeerWindowMS,
+		Peers:        peers,
+		Terminator:   terminators,
 	}
 	srv.Handler() // build the mux once, at swap time
 	return srv, nil

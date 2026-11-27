@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // The path is the route's own history: the ingress nodes a request has already
@@ -23,8 +25,33 @@ const (
 // ErrPathLoop is the typed refusal for a route that already contains this node.
 var ErrPathLoop = errors.New("route contains this node")
 
-// ParsePath reads a comma-separated path. An empty value is no path.
-func ParsePath(raw string) ([]string, error) {
+// ErrClockDisagreement is the typed refusal for a hop whose stamp does not fit
+// the window for its link. Two adjacent edges that cannot agree on "now" within
+// their window have a wobble to settle; discovering it at the window rather than
+// at the route span is the whole point of a tight edge window.
+var ErrClockDisagreement = errors.New("hop timestamp outside the link window")
+
+// DefaultPeerWindow is how far adjacent edges may disagree by default: far
+// tighter than the route span, and still 5x the LAN round trip. The measured
+// floor is ~1 ms; a deployment may go tighter at the cost of dissolving routes
+// under load.
+const DefaultPeerWindow = 100 * time.Millisecond
+
+// ErrHopUnstamped is a hop from a peer that carries no stamp, so its age cannot
+// be judged at all.
+var ErrHopUnstamped = errors.New("hop carries no timestamp")
+
+// Hop is one node on the path, with the instant it appended itself. The stamp is
+// the hop's own clock, which is what a tight link window can disagree with.
+type Hop struct {
+	Name string
+	At   int64 // UnixMilli; 0 when the peer did not stamp
+}
+
+// ParsePath reads a comma-separated path of name@millis items. An empty value is
+// no path. A name without a stamp is accepted here and refused later, where the
+// distinction between "no peer" and "a peer that cannot be judged" is known.
+func ParsePath(raw string) ([]Hop, error) {
 	if raw == "" {
 		return nil, nil
 	}
@@ -32,11 +59,23 @@ func ParsePath(raw string) ([]string, error) {
 	if len(parts) > maxPathHops {
 		return nil, fmt.Errorf("path carries %d hops, limit %d", len(parts), maxPathHops)
 	}
-	hops := make([]string, 0, len(parts))
+	hops := make([]Hop, 0, len(parts))
 	for _, part := range parts {
-		hop := strings.TrimSpace(part)
-		if hop == "" || len(hop) > 64 || strings.ContainsAny(hop, "\t\n\r") {
+		item := strings.TrimSpace(part)
+		if item == "" || len(item) > 80 || strings.ContainsAny(item, "\t\n\r") {
 			return nil, fmt.Errorf("malformed hop %q", part)
+		}
+		name, atText, hasAt := strings.Cut(item, "@")
+		if name == "" || len(name) > 64 {
+			return nil, fmt.Errorf("malformed hop %q", part)
+		}
+		hop := Hop{Name: name}
+		if hasAt {
+			at, err := strconv.ParseInt(atText, 10, 64)
+			if err != nil || at < 0 {
+				return nil, fmt.Errorf("malformed hop stamp %q", part)
+			}
+			hop.At = at
 		}
 		hops = append(hops, hop)
 	}
@@ -46,23 +85,56 @@ func ParsePath(raw string) ([]string, error) {
 // AppendHop adds this node to the path, refusing a route that already contains
 // it. A node that has already seen a request must not see it again: that is a
 // loop, and a loop is refused by construction rather than bounded by a timeout.
-func AppendHop(path []string, node string) ([]string, error) {
+func AppendHop(path []Hop, node string, at int64) ([]Hop, error) {
 	if node == "" {
 		return path, nil
 	}
 	for _, hop := range path {
-		if hop == node {
+		if hop.Name == node {
 			return nil, ErrPathLoop
 		}
 	}
 	if len(path)+1 > maxPathHops {
 		return nil, fmt.Errorf("path would carry %d hops, limit %d", len(path)+1, maxPathHops)
 	}
-	return append(append([]string(nil), path...), node), nil
+	return append(append([]Hop(nil), path...), Hop{Name: node, At: at}), nil
 }
 
-// FormatPath renders a path for the envelope.
-func FormatPath(path []string) string { return strings.Join(path, ",") }
+// CheckHopAges judges every stamped hop against the window for its link. A hop
+// with no stamp from a peer cannot be judged, which is a disagreement rather
+// than a pass: silence is not agreement.
+func CheckHopAges(path []Hop, now time.Time, window time.Duration) error {
+	if window <= 0 {
+		return nil
+	}
+	for _, hop := range path {
+		if hop.At == 0 {
+			return fmt.Errorf("%w: %q", ErrHopUnstamped, hop.Name)
+		}
+		at := time.UnixMilli(hop.At)
+		if at.After(now.Add(window)) {
+			return fmt.Errorf("%w: %q is %s in the future", ErrClockDisagreement, hop.Name, at.Sub(now).Round(time.Millisecond))
+		}
+		if age := now.Sub(at); age > window {
+			return fmt.Errorf("%w: %q is %s old, window is %s", ErrClockDisagreement, hop.Name, age.Round(time.Millisecond), window)
+		}
+	}
+	return nil
+}
+
+// FormatPath renders a path for the envelope. The stamp travels with the name so
+// the next hop can judge this one against its own link window.
+func FormatPath(path []Hop) string {
+	parts := make([]string, 0, len(path))
+	for _, hop := range path {
+		if hop.At == 0 {
+			parts = append(parts, hop.Name)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s@%d", hop.Name, hop.At))
+	}
+	return strings.Join(parts, ",")
+}
 
 // PeerSet is the set of addresses whose path claims are believed.
 type PeerSet []*net.IPNet

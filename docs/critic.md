@@ -10,7 +10,7 @@ Nothing here says "safe". Each row is a position.
 
 | outcome | before | after | what moved it |
 | --- | --- | --- | --- |
-| **jitter-vs-tampering alias** | drift | **drift** | Shape classes now separate *classes* (small/medium/bulk) and a declaration is scored against the body it carries (`shape_mismatch`). Heavy-versus-hostile inside one class is still aliased. |
+| **jitter-vs-tampering alias** | drift | **pass, as stated** | The two are on different channels: a forged stamp is a signature failure, and a late one is a window failure. The peer window is a *jitter* bound with a measured curve (1 ms: 84% false dissolution under load; 25 ms: 0 at c=8; 100 ms: 0 at c=32). Tampering by a *key-holder* is outside the window and is covered by the policy isotope, the canary and the witness gap — not by timing. |
 | **tri-state collapse** | pass | **pass** | Decisions stay typed; `/status` reports `resolved`, `forwarded`, `border_seen`, `witness_gap` and quarantines by reason. `/readyz` is binary on purpose — it is the balancer's contract, not a collapse. |
 | **side-channel bleed** | drift | **pass** | The shape budgets are published on `/policy`. A capacity that anyone can read cannot be discovered by probing, so the 429 carries no information that is not already public. `/resolve` still returns the agreed border address to a token holder — declared in the feature, and the token is the capability. |
 | **sybil carrier flooding** | drift | **drift** | Bounded by `max_conns` and per-class budgets, refused rather than queued. Still one shared token and no per-caller identity; the excess waits in the kernel accept queue. |
@@ -34,6 +34,7 @@ freshness. Two bounds:
 | link window | 5 s (grace tick) | a node may present the previous tick's path |
 | route span | 15 s (three ticks) | past it the route **dissolves** |
 | edge link | 25–100 ms (proven to 1 ms) | a short path may be held to a much tighter window |
+| peer window | 100 ms | adjacent edges must agree on "now"; false dissolutions measured per load |
 
 Measured across the LAN (front on jack, border on dmz): a route started 1 s ago,
 14 s ago and just now was accepted; one started 20 s ago returned

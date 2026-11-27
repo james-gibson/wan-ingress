@@ -93,7 +93,7 @@ func (f *Forwarder) Forward(ctx context.Context, route Route, name string, body 
 
 // ForwardPath is Forward with the route's history. Kept as the simple form for
 // callers that only need the status.
-func (f *Forwarder) ForwardPath(ctx context.Context, route Route, name string, body []byte, hops []string) (int, error) {
+func (f *Forwarder) ForwardPath(ctx context.Context, route Route, name string, body []byte, hops []Hop) (int, error) {
 	out, err := f.ForwardObserved(ctx, route, name, body, hops, time.Now().UnixMilli())
 	return out.Status, err
 }
@@ -101,7 +101,7 @@ func (f *Forwarder) ForwardPath(ctx context.Context, route Route, name string, b
 // ForwardObserved is ForwardPath returning what came back as well as what
 // happened: whether the canary survived the round trip and how many requests the
 // border says it has seen.
-func (f *Forwarder) ForwardObserved(ctx context.Context, route Route, name string, body []byte, hops []string, start int64) (Outcome, error) {
+func (f *Forwarder) ForwardObserved(ctx context.Context, route Route, name string, body []byte, hops []Hop, start int64) (Outcome, error) {
 	if !f.Ready() || route.Address == "" {
 		return Outcome{}, ErrBorderUnconfigured
 	}

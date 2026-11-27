@@ -13,16 +13,17 @@ import (
 // forwarding, and observable refusals. It is built from the feature in
 // features/wan-ingress.feature.
 type Server struct {
-	Resolver    *Resolver
-	Forwarder   *Forwarder
-	Token       string
-	Observer    *Observer
-	Node        string
-	RouteSpanMS int
-	Peers       PeerSet
-	Terminator  PeerSet
-	Shapes      *ShapeSet
-	Bans        *BanLog
+	Resolver     *Resolver
+	Forwarder    *Forwarder
+	Token        string
+	Observer     *Observer
+	Node         string
+	RouteSpanMS  int
+	PeerWindowMS int
+	Peers        PeerSet
+	Terminator   PeerSet
+	Shapes       *ShapeSet
+	Bans         *BanLog
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -204,20 +205,30 @@ type policyBody struct {
 // routePath extends the route history with this node. A caller-supplied path is
 // believed only from a configured peer; otherwise it is discarded so that an
 // anonymous caller cannot make this node refuse a request on another's behalf.
-func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]Hop, bool) {
 	// A terminator relays arbitrary clients, so its address proves nothing
 	// about the path it forwards. Only a directly reached peer is believed.
 	trusted := s.Peers.Contains(r.RemoteAddr) && !s.Terminator.Contains(r.RemoteAddr)
-	var carried []string
+	var carried []Hop
 	if trusted {
 		parsed, err := ParsePath(r.Header.Get(pathHeader))
 		if err != nil {
 			s.refuse(w, r, http.StatusUnprocessableEntity, "malformed")
 			return nil, false
 		}
+		// A peer's hops are judged against this link's window before the route
+		// grows: a wobble is cheapest to settle at the hop that revealed it.
+		if err := CheckHopAges(parsed, time.Now(), s.peerWindow()); err != nil {
+			reason := "clock_disagreement"
+			if errors.Is(err, ErrPathLoop) {
+				reason = "path_loop"
+			}
+			s.refuse(w, r, http.StatusUnprocessableEntity, reason)
+			return nil, false
+		}
 		carried = parsed
 	}
-	path, err := AppendHop(carried, s.Node)
+	path, err := AppendHop(carried, s.Node, time.Now().UnixMilli())
 	if err != nil {
 		reason := "path_loop"
 		if !errors.Is(err, ErrPathLoop) {
@@ -227,6 +238,17 @@ func (s *Server) routePath(w http.ResponseWriter, r *http.Request) ([]string, bo
 		return nil, false
 	}
 	return path, true
+}
+
+// peerWindow is the tolerance allowed between adjacent edges. It is tighter than
+// the route span on purpose: the span accepts a path's age, while this judges a
+// single link's clock, and a disagreement found here is fixed in one round trip
+// instead of waiting for the route to outlive its grace.
+func (s *Server) peerWindow() time.Duration {
+	if s.PeerWindowMS <= 0 {
+		return DefaultPeerWindow
+	}
+	return time.Duration(s.PeerWindowMS) * time.Millisecond
 }
 
 // refuse records and answers one typed quarantine, and offers the caller to the

@@ -46,6 +46,7 @@ var (
 	banLog     = flag.String("ban-log", "", "file of ban lines for a host filter (fail2ban); empty disables")
 	neverBan   = flag.String("never-ban", "", "comma-separated IPs/CIDRs that can never be banned (the jump host)")
 	routeSpan  = flag.Int("route-span-ms", 0, "how long a negotiated path stays usable (default 15000)")
+	peerWindow = flag.Int("peer-window-ms", 0, "how far adjacent edges' clocks may disagree (default 100)")
 	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
 	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
 )
@@ -256,6 +257,8 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.NeverBan = splitList(*neverBan)
 		case "route-span-ms":
 			cfg.RouteSpanMS = *routeSpan
+		case "peer-window-ms":
+			cfg.PeerWindowMS = *peerWindow
 		}
 	})
 }
