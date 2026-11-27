@@ -21,6 +21,19 @@ var ErrBorderUnconfigured = errors.New("border key or border address not configu
 
 const maxForwardBody = 1 << 20
 
+// borderTransport is shared by every forward so the border connection pool is
+// reused across requests and across a SIGHUP swap. http.DefaultTransport keeps
+// only two idle connections per host, so at concurrency the front would open
+// and close a connection per request — churn the border pays for.
+var borderTransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	MaxIdleConns:          256,
+	MaxIdleConnsPerHost:   64,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
 // Forwarder signs and sends one request to an agreed border. It never accepts
 // a destination from the caller.
 type Forwarder struct {
@@ -86,7 +99,7 @@ func (f *Forwarder) ForwardPath(ctx context.Context, route Route, name string, b
 
 	client := f.Client
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = &http.Client{Timeout: 5 * time.Second, Transport: borderTransport}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
