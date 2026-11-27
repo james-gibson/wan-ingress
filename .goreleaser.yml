@@ -1,0 +1,58 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+# One archive carries the front, the authority tool and the container probe, so
+# an operator who installs the gateway also has the piece that issues its grant.
+builds:
+  - id: wan-ingress
+    main: ./cmd/wan-ingress
+    binary: wan-ingress
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.buildVersion={{ .Version }}
+
+  - id: wan-ingress-grant
+    main: ./cmd/wan-ingress-grant
+    binary: wan-ingress-grant
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+  - id: healthcheck
+    main: ./cmd/healthcheck
+    binary: healthcheck
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  - id: wan-ingress
+    ids: [wan-ingress, wan-ingress-grant, healthcheck]
+    # go-selfupdate matches release assets by {project}_{os}_{arch}.tar.gz; the
+    # project name is the repository name, which is what `lezz install` looks
+    # for.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

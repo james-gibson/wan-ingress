@@ -83,3 +83,13 @@ jobs:
           for target in FuzzResolveName FuzzQuarantineContract FuzzBorderForward FuzzCanonicalize FuzzConfig; do
             go test ./internal/ingress -run='^$' -fuzz="^${target}$" -fuzztime=10m
           done
+
+  release-config:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check

@@ -28,6 +28,9 @@ import (
 
 const registryName = "wan-ingress"
 
+// buildVersion is set by the release build; a development build says dev.
+var buildVersion = "dev"
+
 // Flag values are package-level so applyFlags can tell an explicit override
 // from a default: a config file must not be overwritten by an unset flag.
 var (
@@ -57,7 +60,13 @@ func main() {
 	configPath := flag.String("config", "", "path to the JSON config (flags override its fields)")
 	heartbeat := flag.Duration("heartbeat", ingress.HeartbeatInterval, "registry renewal interval")
 	checkConfig := flag.Bool("check-config", false, "validate the config and exit without listening")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("wan-ingress %s\n", buildVersion)
+		return
+	}
 
 	cfg, err := resolveConfig(*configPath)
 	if err != nil {
