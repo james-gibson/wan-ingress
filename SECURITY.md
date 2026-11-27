@@ -62,7 +62,8 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | over-long name | 254 bytes | `422 malformed`, never truncated | `TestParseName` |
 | oversized body | > 1 MiB | `422`, border never contacted | `TestOversizedBodyIsRefusedBeforeTheBorder` |
 | duplicate `name` parameters | `?name=42&name=evil` | first wins for both resolve and forward | `TestDuplicateNameParametersResolveAndForwardTheSameName` |
-| stale captured envelope | `X-Lab-Timestamp` outside ±60s | border refuses | `harness/border_adapter_test.py` |
+| stale captured envelope | `X-Lab-Timestamp` outside the window | border refuses | `harness/border_adapter_test.py` |
+| a window tighter than a second | millisecond timestamps | 40/40 forwards pass at **1 ms** across the LAN | live sweep, see below |
 | a resolution counted as a forward | the monitor's green light | only `/forward` advertises `ingress/forward` | `TestResolveAloneDoesNotAdvertiseForwarding` |
 | anonymous status scraping | `/status`, `/mcp`, `/readyz` | counters and readiness only; no route, address or namespace | `TestAnonymousSurfacesLeakNoRoute` |
 | a route that already contains this node | `X-Lab-Path` | `422 path_loop`, refused before the body and before the border | `TestRouteContainingThisNodeIsRefused` |
@@ -71,6 +72,32 @@ still a public listener, and it is exactly the shape a monitor should alarm on.
 | a peer range that overlaps the terminator | `check-config` | refused at startup | `TestCheckDeployableRefusesAPeerInsideTheTerminator` |
 | rewriting the path or the policy in transit | both are inside the HMAC | the border's signature check fails | `harness/border_adapter_test.py` |
 | two nodes running different declarations | `GET /policy` | same declaration → same isotope; a difference is visible from outside either node | `TestTheSameDeclarationDerivesTheSameIsotope`, `TestADifferentDeclarationDerivesADifferentIsotope` |
+
+### The freshness window
+
+The envelope carries **milliseconds**, not seconds, so a window tighter than one
+second is expressible. The lab's 5 s tick is a clock-skew tolerance for the
+cluster; it is not the finest claim the envelope can support.
+
+The window must exceed `one-way delay + clock skew + jitter`, so it is set per
+deployment. Measured on 2026-11-27, front on jack and border on dmz across a
+1 Gbps LAN (0.32 ms RTT), 40 forwards per setting:
+
+| window | accepted |
+| --- | --- |
+| 1000 ms | 40/40 |
+| 100 ms | 40/40 |
+| 25 ms | 40/40 |
+| 10 ms | 40/40 |
+| 5 ms | 40/40 |
+| **1 ms** | **40/40** |
+
+The two hosts' clocks agree to better than a millisecond, so on this LAN the
+window is bounded by the path, not by skew. The 5 s tick is roughly 5000× looser
+than the mechanism needs. It stays the right number for the *cluster* — a tick is
+a shared schedule, not a freshness check — but an operator setting the envelope
+window should use `one-way delay + margin`, and 100 ms is a sane default for a
+nearby edge over 25 ms, which leaves no room for a WAN path.
 
 ### Measured, not asserted
 

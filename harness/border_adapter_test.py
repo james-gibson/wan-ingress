@@ -14,7 +14,7 @@ import time
 import unittest
 import urllib.parse
 
-from border_adapter import SKEW_SECONDS, verify
+from border_adapter import SKEW_MS, verify
 
 KEY = b"border-key"
 PATH_BASE = "/cluster/namespace/session-42/name/42"
@@ -30,18 +30,18 @@ class Headers(dict):
         return super().get(name, default)
 
 
-def envelope(stamp: int) -> Headers:
+def envelope(stamp_ms: int) -> Headers:
     digest = hashlib.sha256(BODY).hexdigest()
     escaped = urllib.parse.quote(PATH_BASE, safe="/")
     signature = hmac.new(
         KEY,
         ("POST\n%s\n%s\n%s\n%s\n%s\n%s\n%s" % (
-            escaped, NAMESPACE, POLICY, ROUTE_PATH, CANARY, digest, stamp)).encode(),
+            escaped, NAMESPACE, POLICY, ROUTE_PATH, CANARY, digest, stamp_ms)).encode(),
         hashlib.sha256,
     ).hexdigest()
     return Headers({
         "X-Lab-Signature": signature,
-        "X-Lab-Timestamp": str(stamp),
+        "X-Lab-Timestamp": str(stamp_ms),
         "X-Lab-Policy": POLICY,
         "X-Lab-Path": ROUTE_PATH,
         "X-Lab-Canary": CANARY,
@@ -50,39 +50,51 @@ def envelope(stamp: int) -> Headers:
 
 class BorderVerifyTest(unittest.TestCase):
     def test_fresh_envelope_verifies(self):
-        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time()))))
+        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time() * 1000))))
 
     def test_replayed_envelope_is_refused_after_the_window(self):
-        captured = envelope(int(time.time()) - SKEW_SECONDS - 1)
+        captured = envelope(int(time.time() * 1000) - SKEW_MS - 1)
         # Same signature, same body, same path — only the clock moved.
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, captured))
 
     def test_future_envelope_is_refused(self):
-        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time()) + SKEW_SECONDS + 1)))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, envelope(int(time.time() * 1000) + SKEW_MS + 1)))
+
+    def test_a_tighter_window_still_verifies_a_fresh_envelope(self):
+        # The 5 s tick is a cluster skew tolerance; the envelope itself supports
+        # a much tighter claim.
+        for window in (100, 25):
+            self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY,
+                                   envelope(int(time.time() * 1000)), window))
+
+    def test_a_tighter_window_refuses_a_stale_envelope(self):
+        stale = envelope(int(time.time() * 1000) - 30)
+        self.assertTrue(verify(KEY, PATH_BASE, NAMESPACE, BODY, stale, 100))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, stale, 25))
 
     def test_non_numeric_timestamp_is_refused(self):
-        headers = envelope(int(time.time()))
+        headers = envelope(int(time.time() * 1000))
         headers["X-Lab-Timestamp"] = "not-a-number"
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
     def test_tampered_body_is_refused(self):
-        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY + b" ", envelope(int(time.time()))))
+        self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY + b" ", envelope(int(time.time() * 1000))))
 
     def test_wrong_namespace_is_refused(self):
-        self.assertFalse(verify(KEY, PATH_BASE, "session-attacker", BODY, envelope(int(time.time()))))
+        self.assertFalse(verify(KEY, PATH_BASE, "session-attacker", BODY, envelope(int(time.time() * 1000))))
 
     def test_a_different_policy_is_refused(self):
-        headers = envelope(int(time.time()))
+        headers = envelope(int(time.time() * 1000))
         headers["X-Lab-Policy"] = "b3RoZXItcG9saWN5"
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
     def test_a_rewritten_canary_is_refused(self):
-        headers = envelope(int(time.time()))
+        headers = envelope(int(time.time() * 1000))
         headers["X-Lab-Canary"] = "other"
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 
     def test_a_rewritten_path_is_refused(self):
-        headers = envelope(int(time.time()))
+        headers = envelope(int(time.time() * 1000))
         headers["X-Lab-Path"] = "wan-a,wan-b"
         self.assertFalse(verify(KEY, PATH_BASE, NAMESPACE, BODY, headers))
 

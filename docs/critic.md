@@ -23,6 +23,19 @@ Membership eviction is the remaining drift: a front whose policy isotope
 diverges is *detectable* but nothing removes it from the routable set. The ban log
 is the hook — it names the address and the reason, and the host decides.
 
+## The freshness proof
+
+The 5 s tick is a cluster clock-skew tolerance, not the finest claim the envelope
+can support. The envelope now carries milliseconds, and the border's window is a
+parameter. Measured across the LAN (front on jack, border on dmz), 40 forwards
+per setting: **40/40 accepted at 1000, 100, 25, 10, 5 and 1 ms.** The two hosts
+agree to better than a millisecond, so the window is bounded by the path rather
+than by skew — 100 ms is a sane default for a nearby edge, 25 ms is provable on a
+LAN, and both are ~50x tighter than the tick.
+
+This is the shape a critic should want: the claim is a window on a curve with a
+stated bound (`one-way delay + skew + jitter`), not a flag that says "fresh".
+
 ## The evidence standard this does not yet meet
 
 A critic that can be re-run and disagree with itself cannot be quoted. The

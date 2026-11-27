@@ -133,7 +133,10 @@ func (f *Forwarder) ForwardObserved(ctx context.Context, route Route, name strin
 		req.Header.Set(canaryHeader, canary)
 	}
 	digest := sha256.Sum256(body)
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	// Milliseconds, not seconds: a freshness window tighter than one second has
+	// to be expressible before it can be enforced. The 5 s tick exists for clock
+	// skew across a cluster; the envelope can carry a much tighter claim.
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	mac := hmac.New(sha256.New, f.BorderKey)
 	_, _ = fmt.Fprintf(mac, "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
 		http.MethodPost, u.EscapedPath(), route.Namespace, f.Policy, FormatPath(hops),

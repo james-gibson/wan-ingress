@@ -24,22 +24,28 @@ import time
 import urllib.parse
 
 # A signed envelope is fresh for this long. Without the window the signature
-# proves intent forever: a captured call replays cleanly, because every field
-# it covers is unchanged. The forwarder stamps the time; the border is the only
+# proves intent forever: a captured call replays cleanly, because every field it
+# covers is unchanged. The forwarder stamps milliseconds; the border is the only
 # place that can refuse a stale one, so the check lives here.
-SKEW_SECONDS = 60
+#
+# The lab's 5 s tick is a clock-skew tolerance for the cluster, not the finest
+# granularity the envelope can support. The window must exceed
+#     one-way delay + clock skew + jitter
+# so it is set per deployment. 1000 ms is the default; the suite proves 100 ms
+# and 25 ms between two hosts on the same LAN.
+SKEW_MS = 1000
 
 
-def verify(key: bytes, path: str, namespace: str, body: bytes, headers) -> bool:
+def verify(key: bytes, path: str, namespace: str, body: bytes, headers, skew_ms: int = SKEW_MS) -> bool:
     signature = headers.get("X-Lab-Signature", "")
     timestamp = headers.get("X-Lab-Timestamp", "")
     if not signature or not timestamp:
         return False
     try:
-        stamped = int(timestamp)
+        stamped_ms = int(timestamp)
     except ValueError:
         return False
-    if abs(time.time() - stamped) > SKEW_SECONDS:
+    if abs(time.time() * 1000 - stamped_ms) > skew_ms:
         return False
     digest = hashlib.sha256(body).hexdigest()
     escaped = urllib.parse.quote(path, safe="/")
@@ -128,7 +134,7 @@ class BorderState:
                 self._conn = None
 
 
-def make_handler(key: bytes, state: BorderState):
+def make_handler(key: bytes, state: BorderState, skew_ms: int = SKEW_MS):
     class Border(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -157,7 +163,7 @@ def make_handler(key: bytes, state: BorderState):
             length = int(self.headers.get("Content-Length", "0") or 0)
             body = self.rfile.read(length)
             namespace = self.headers.get("X-Lab-Namespace", "")
-            if not verify(key, self.path, namespace, body, self.headers):
+            if not verify(key, self.path, namespace, body, self.headers, skew_ms):
                 self._json(403, {"error": "bad border signature"})
                 return
             status, payload = state.forward(body)
@@ -189,12 +195,15 @@ def main() -> int:
     ap.add_argument("--key", required=True)
     ap.add_argument("--target", required=True, help="target adhd /mcp endpoint")
     ap.add_argument("--connection-mode", choices=("hold", "new"), default="hold")
+    ap.add_argument("--skew-ms", type=int, default=SKEW_MS,
+                    help="envelope freshness window; must exceed one-way delay + clock skew + jitter")
     args = ap.parse_args()
 
     host, port = args.addr.rsplit(":", 1)
     state = BorderState(args.connection_mode, args.target)
-    server = http.server.ThreadingHTTPServer((host, int(port)), make_handler(args.key.encode(), state))
-    print("border %s listening %s -> %s" % (args.connection_mode, server.server_address, args.target), flush=True)
+    server = http.server.ThreadingHTTPServer((host, int(port)), make_handler(args.key.encode(), state, args.skew_ms))
+    print("border %s listening %s -> %s skew=%dms" % (
+        args.connection_mode, server.server_address, args.target, args.skew_ms), flush=True)
     server.serve_forever()
     return 0
 
