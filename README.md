@@ -1,0 +1,156 @@
+# wan-ingress
+
+> A thin WAN-facing front that resolves essentially any inbound name into
+> **agreed** cluster addresses and namespaces, and forwards only through a
+> signed border. It does not route by guessing.
+
+One static Go binary, pure standard library. Installs as one file plus a JSON
+config and its agreement file.
+
+| field | value |
+| --- | --- |
+| isotope (origin feature) | `5205c3f5d2de34a8…` |
+| tokens / parts | 111 / 19 |
+| key | `seed-42` |
+
+The origin is [`features/wan-ingress.feature`](features/wan-ingress.feature),
+written and validated before the first line of Go.
+[`internal/ingress/spec_test.go`](internal/ingress/spec_test.go) re-reads it with
+`isotope.ParseGherkin` + `CanonicalizeGherkinToIsotope`, so the declaration and
+the code cannot drift apart. The file is byte-identical to the one the
+shell-to-gherkin canon validated, and the signature above is reproduced by
+`isotope v0.6.0`.
+
+## The two gates
+
+- **G1 — scope:** WAN front → lab border. The public side has thin admission;
+  isotope rungs and the BAML border remain authority inside the lab.
+- **G2 — resolver:** accept all, quarantine unknowns. Parsing is total;
+  forwarding needs an agreement. Unknown, ambiguous and malformed inputs get a
+  typed refusal; addresses and namespaces come only from the operator's
+  agreement file.
+
+## Surface
+
+- `GET /healthz` → `200 ok` with no configuration
+- `GET /readyz` → `200 ready` only with token and border key
+- `GET /resolve?name=<raw>` → agreed route, or `422` with `malformed` / `unknown` / `ambiguous`
+- `POST /forward?name=<raw>` → HMAC-signed border envelope, or a typed refusal
+  (`border_unconfigured` included); caller-supplied address headers are ignored
+- `GET /status` → forwarded count and quarantines by reason
+- `POST /mcp` → JSON-RPC probe surface for smoke-alarm (`initialize`,
+  `ingress/status`, `notifications/initialized`)
+
+Defaults are deliberately fail-closed: no agreements, token or key means the
+process answers health/status and refuses everything else.
+
+## It is monitored, not self-reporting
+
+[`configs/wan-ingress-alarm.yaml`](configs/wan-ingress-alarm.yaml) is a
+smoke-alarm target that probes `POST /mcp` with a JSON-RPC handshake and
+requires `ingress/forward` in `min_capabilities`. The front advertises that
+capability **only after an agreed request has actually crossed the signed
+border**. So the lab's own instruments see:
+
+| state | alarm | adhd light |
+| --- | --- | --- |
+| answers, never forwarded | degraded | **yellow** (defensive) |
+| has forwarded | healthy | **green** |
+| process is gone | regression / unhealthy | **red** |
+
+[`harness/spike.sh`](harness/spike.sh) drives the real smoke-alarm and adhd spin
+harnesses through `dark → yellow → green → red` and asserts every hop from the
+monitor's status and adhd's light log — not from the front's `/healthz`.
+
+No caller carries the ingress URL. The listener address is only a binding; the
+front's address is the isotope name `wan-ingress`. The harness's
+[`harness/proxy/`](harness/proxy/) stands in for another cluster's egress/alarms:
+it resolves that name from the registry and forwards both the probe and the
+data-plane call. It is harness-only; the shipped binary is unchanged and stays
+unaware of addressing beyond its agreements.
+
+A blue-team baseline
+([`harness/blue_adhd_proxy_test.py`](harness/blue_adhd_proxy_test.py)) puts two
+caller adhd proxies on the same generation: one reaches a target directly, the
+other by invite through the ingress and a signed harness border. Both call the
+same `adhd.proxy` method, so only the boundary varies. Unsigned border copies,
+tokenless callers and unagreed names are refused; the measured latency is
+reported as the cost of the boundary, not as the security finding. A second run
+compares held connections against new ones: holding reuses one ingress↔border
+and one border↔target connection across 60 calls, while the new-connection mode
+opens 61 of each and shows the churn cost.
+
+## Self-healing
+
+- the registry name is renewed on a heartbeat (`-heartbeat`, default 1m, inside
+  smoke-alarm's 5m TTL); a failed beat is logged and retried, never fatal
+- a clean signal drains the listener and sends the registry a delete; a crash
+  leaves the lease to the TTL sweep
+  ([smoke-alarm#112](https://github.com/james-gibson/smoke-alarm/issues/112)
+  tracks adding the missing delete route; until then the delete is best-effort)
+- `SIGHUP` reloads the config and agreements atomically: new traffic can be
+  added without a restart, counters survive the swap, and a bad file keeps the
+  last good policy
+- [`scripts/install-wan-ingress.sh`](scripts/install-wan-ingress.sh) installs a
+  launchd `KeepAlive` agent on macOS or a systemd `Restart=always` user unit on
+  Linux, so a crash is restarted by the host
+
+## Install
+
+Network access alone produces a fail-closed listener. The install script
+refuses to run without `CONFIG`:
+
+```sh
+cp configs/wan-ingress.example.json configs/wan-ingress.json
+cp configs/wan-ingress-agreements.example.json configs/agreements.json
+# fill in the token, the border HMAC key, the border URL and the registry URL
+
+BINARY=./dist/wan-ingress-darwin-arm64 CONFIG=./configs/wan-ingress.json \
+  ./scripts/install-wan-ingress.sh
+```
+
+`./scripts/build-wan-ingress.sh` produces statically linked, stripped binaries
+for darwin/linux × amd64/arm64 with SHA-256SUMS. `DOCKER.md` covers the
+distroless image and the hardened Compose stack.
+
+## The address plane is not in this repo
+
+Resolving an invite to a binding, and requiring a signed rotational
+announcement before a call is forwarded, belongs to the seed the name belongs
+to. That plane ships from
+[lezz.go](https://github.com/james-gibson/lezz.go)
+([`docs/seed.md`](https://github.com/james-gibson/lezz.go/blob/main/docs/seed.md#the-address-plane)):
+`seed-announce` signs a rotation, `seed-invite` arms a one-shot expectation and
+forwards with the operator token. This front sees an ordinary agreed call and
+knows nothing about DNS, mDNS, seeds or slots.
+
+A rotation ticket is evidence of an arrival, never a bearer credential.
+`internal/ingress` refuses any caller whose token is not the configured one,
+whatever headers travel with it; that is asserted in
+[`internal/ingress/ticket_test.go`](internal/ingress/ticket_test.go).
+
+## Verification
+
+- `go test ./...` — green
+- `go vet ./...` — clean
+- five fuzz targets: `FuzzResolveName`, `FuzzQuarantineContract`,
+  `FuzzBorderForward`, `FuzzCanonicalize`, `FuzzConfig`. Two parts of the
+  feature are fuzz regressions: `"0 ."` was canonicalised with a trailing space
+  on one read and differently on the next (fixed by trimming to a fixed point),
+  and `%25` decoded to a canonical `%` that then failed to reparse (fixed by
+  refusing a decoded percent). Both crashers are kept in `testdata/fuzz/`.
+- `ocd-smoke-alarm validate -config configs/wan-ingress-alarm.yaml` — valid
+- `harness/spike.sh` — PASS, with the light transitions recorded above
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) enforces the PR 30s
+  fuzz smoke, the 10m nightly fuzz on Linux/macOS, the cross-build matrix and
+  the image build
+
+Refusals are observable on `/status`; the registry (not the binary) judges the
+trust rung, and the alarm (not the binary) judges health.
+
+## Provenance
+
+Designed on [lab-safety#38](https://github.com/james-gibson/lab-safety/issues/38)
+and first written in [lab-safety#39](https://github.com/james-gibson/lab-safety/pull/39).
+Moved here, with the seed/address plane split out to lezz.go, so the lab keeps
+one repository per tool.

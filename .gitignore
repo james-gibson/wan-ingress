@@ -1,0 +1,8 @@
+# Cross-compiled one-file binaries and their checksums (scripts/build-wan-ingress.sh)
+/dist/
+
+# Local Docker secrets
+.env
+
+# Local OCI bake output
+dist/

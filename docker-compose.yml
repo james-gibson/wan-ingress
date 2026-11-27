@@ -1,0 +1,40 @@
+# Hardened edge stack: one front. Fill the placeholders in configs/docker/*.json
+# before `docker compose up`. The border and smoke-alarm registry are
+# operator-supplied services; the compose command flags let their URLs be
+# overridden without editing the mounted files.
+#
+# The seed/address plane (seed-invite, seed-announce) is installed from lezz.go
+# and runs where the seed lives. This stack is the front only, so the front
+# keeps knowing nothing about DNS, mDNS and inviters.
+name: wan-ingress-edge
+
+x-hardening: &hardening
+  restart: unless-stopped
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp
+  pids_limit: 64
+  mem_limit: 128m
+  cpus: 0.50
+
+services:
+  wan-ingress:
+    <<: *hardening
+    build:
+      context: .
+      target: wan-ingress
+    image: wan-ingress/wan-ingress:local
+    ports:
+      - "${WAN_INGRESS_PORT:-8443}:8443"
+    volumes:
+      - ./configs/docker/wan-ingress.json:/etc/wan-ingress/wan-ingress.json:ro
+      - ./configs/docker/agreements.json:/etc/wan-ingress/agreements.json:ro
+    command:
+      - -config
+      - /etc/wan-ingress/wan-ingress.json
+      - -smoke-alarm
+      - "${SMOKE_ALARM_URL:-http://smoke-alarm:19100}"
