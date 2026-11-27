@@ -150,6 +150,30 @@ rather than failing to start.
 data-free host, the cgroup that makes "it restarts" true without taking the host
 down, and why the ticket ring waits for a border-side counter.
 
+## Capture mode: what the internet says to an empty gateway
+
+Deploy the front with no agreements and no token, pointed at a capture file:
+
+```sh
+wan-ingress -addr 0.0.0.0:443 -dump-unexpected /var/log/wan-ingress/scan.jsonl
+```
+
+Every request is refused, and every refusal is written as one JSON line — the
+request line, the source, the status and the headers, with `Authorization` and
+cookies stripped. That is the scan:
+
+```json
+{"at":"2026-11-27T05:38:44Z","remote":"198.51.100.7:53773","method":"GET",
+ "host":"example.org","path":"/.env","status":404,
+ "headers":{"User-Agent":"Censys/1.0","Accept":"*/*"}}
+```
+
+The capture is bounded on purpose: 4 KiB per line, 50 lines/s by default
+(`-dump-rate`), attacker-controlled strings length-capped and JSON-escaped, and
+**the body is never read** — the request line and headers are the scan, and
+reading bodies would put the capture in the memory path the front exists to
+avoid. Bodies are the next step if the headers prove insufficient, not a default.
+
 ## Self-healing
 
 - the registry name is renewed on a heartbeat (`-heartbeat`, default 1m, inside

@@ -24,6 +24,7 @@ type Server struct {
 	Terminator   PeerSet
 	Shapes       *ShapeSet
 	Bans         *BanLog
+	Dump         *Dumper
 
 	handler http.Handler // built once by Handler, reused by the runtime switch
 }
@@ -57,8 +58,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /resolve", s.serveResolve)
 	mux.HandleFunc("POST /forward", s.serveForward)
 	mux.HandleFunc("POST /mcp", s.serveMonitor)
-	s.handler = mux
-	return mux
+	// The capture is read per request, not bound at build time: main attaches it
+	// after NewServer returns, and a reload may replace it. The wrapper is what
+	// gets cached — caching the bare mux here would drop the capture entirely.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.Dump.Serve(mux, w, r)
+	})
+	s.handler = handler
+	return handler
 }
 
 func (s *Server) ready() bool {

@@ -240,6 +240,15 @@ discovers.
    policy is what `SIGHUP` swaps. Changing `addr` in the file has no effect
    until a restart, which is logged.
 
+## Capture mode
+
+`-dump-unexpected` writes refused requests to a file. It is a deliberate
+exposure: the file is attacker-controlled text, so it is JSON-encoded, length
+capped, rate limited, and **never includes `Authorization`, `Cookie`,
+`Set-Cookie` or `X-Api-Key`** (`TestDumpNeverWritesTheToken`). Pointed at an empty
+gateway it records what the internet says to an unconfigured host; pointed at a
+live gateway it records the requests the gateway did not expect.
+
 ## Eviction
 
 Refusals are counted per address and, past a threshold in a window, written to a

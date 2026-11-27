@@ -52,6 +52,11 @@ type Config struct {
 	// than the route span: the span accepts a path's age, this judges one link.
 	PeerWindowMS int `json:"peer_window_ms,omitempty"`
 
+	// DumpUnexpected is a capture file for refused requests: point it at an empty
+	// gateway and it records what the internet says to an unconfigured host.
+	DumpUnexpected string `json:"dump_unexpected,omitempty"`
+	DumpRate       int    `json:"dump_rate,omitempty"`
+
 	// BanLog is a file of ban lines a host-side filter (fail2ban) can read, and
 	// NeverBan is the allowlist. Enforcement stays outside the front so a bad
 	// threshold cannot lock an operator out of the fix.

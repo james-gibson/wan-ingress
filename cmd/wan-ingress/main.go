@@ -47,6 +47,8 @@ var (
 	neverBan   = flag.String("never-ban", "", "comma-separated IPs/CIDRs that can never be banned (the jump host)")
 	routeSpan  = flag.Int("route-span-ms", 0, "how long a negotiated path stays usable (default 15000)")
 	peerWindow = flag.Int("peer-window-ms", 0, "how far adjacent edges' clocks may disagree (default 100)")
+	dumpPath   = flag.String("dump-unexpected", "", "capture refused requests to this file (an empty gateway records a scan)")
+	dumpRate   = flag.Int("dump-rate", 0, "captured lines per second (default 50)")
 	grant      = flag.String("grant", "", "path to the authority's signed capacity grant")
 	grantKey   = flag.String("grant-key", "", "authority's Ed25519 public key (base64)")
 )
@@ -86,6 +88,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("load policy: %v", err)
 	}
+	if cfg.DumpUnexpected != "" && cfg.DumpRate <= 0 {
+		cfg.DumpRate = 50
+	}
+	dumper, err := ingress.NewDumper(cfg.DumpUnexpected, cfg.DumpRate)
+	if err != nil {
+		log.Fatalf("dump: %v", err)
+	}
+	defer func() { _ = dumper.Close() }()
+	if dumper != nil {
+		log.Printf("capture: refused requests -> %s (max %d/s)", cfg.DumpUnexpected, cfg.DumpRate)
+	}
+	server.Dump = dumper
 	server.Shapes = ingress.NewShapeSet(shapesOf(held))
 	logShapes("boot", server.Shapes)
 	bans, err := banLogFor(cfg)
@@ -166,6 +180,11 @@ func main() {
 			if err != nil {
 				log.Printf("reload rejected, keeping last good policy: %v", err)
 				continue
+			}
+			// The capture file belongs to the process, not the policy: a reload
+			// reuses it unless the path itself changed.
+			if next.DumpUnexpected == cfg.DumpUnexpected {
+				srv.Dump = dumper
 			}
 			srv.Shapes = ingress.NewShapeSet(shapesOf(nextGrant))
 			logShapes("reload", srv.Shapes)
@@ -259,6 +278,10 @@ func applyFlags(cfg *ingress.Config) {
 			cfg.RouteSpanMS = *routeSpan
 		case "peer-window-ms":
 			cfg.PeerWindowMS = *peerWindow
+		case "dump-unexpected":
+			cfg.DumpUnexpected = *dumpPath
+		case "dump-rate":
+			cfg.DumpRate = *dumpRate
 		}
 	})
 }
