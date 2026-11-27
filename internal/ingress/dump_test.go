@@ -131,7 +131,7 @@ func TestDumpIsRateLimited(t *testing.T) {
 	clock := time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
 	dumper.now = func() time.Time { return clock }
 
-	req := httptest.NewRequest(http.MethodGet, "http://x/scan", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://x/scan", http.NoBody)
 	req.RemoteAddr = "192.0.2.9:1234"
 	for i := 0; i < 20; i++ {
 		dumper.Record(req, http.StatusNotFound)
